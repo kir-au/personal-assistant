@@ -86,7 +86,7 @@ function scoreProject(input: string, project: ProjectRecord) {
     business: ['business', 'product', 'customer', 'revenue', 'medium', 'linkedin', 'article', 'startup', 'invoice'],
     ai: ['ai', 'openai', 'chatgpt', 'codex', 'mcp', 'whisper', 'model', 'api', 'agent'],
     family: ['family', 'daughter', 'school', 'parent', 'counsellor', 'семья', 'дочь'],
-    wealth: ['wealth', 'invest', 'tax', 'money', 'super', 'trading'],
+    wealth: ['wealth', 'invest', 'tax', 'money', 'super', 'stock', 'etf', 'dividend'],
     travel: ['travel', 'flight', 'hotel', 'trip', 'japan', 'greece'],
     routine: ['routine', 'morning', 'habit', 'check-in', 'sleep', 'daily'],
     trading: ['trading', 'binance', 'setup', 'position', 'risk'],

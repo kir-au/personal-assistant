@@ -1,138 +1,260 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { CheckCircle2, Circle, Database, RefreshCw, Shield } from 'lucide-react';
-import AssistantActionsPanel, { type AssistantReview, type AssistantTask } from './AssistantActionsPanel';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Archive, ArrowRight, CalendarDays, Check, CheckCircle2, Circle, RefreshCw, Sparkles } from 'lucide-react';
+import type { AssistantTask } from './AssistantActionsPanel';
 
 type PlannerTask = AssistantTask;
+type PlannerItemAction = 'done' | 'move-tomorrow' | 'deprioritize';
+
+interface WeeklyDay {
+  date: string;
+  taskId: string;
+  whyNow: string;
+}
+
+interface WeeklyDecision {
+  id: string;
+  projectId: string;
+  title: string;
+  question: string;
+  reason: string;
+  nextStep: string;
+  evidencePath?: string;
+}
+
+interface WeeklyBrief {
+  title: string;
+  weekOf: string;
+  status: 'proposed' | 'accepted';
+  premise: string;
+  constraints: string[];
+  days: WeeklyDay[];
+  decisions: WeeklyDecision[];
+}
 
 interface PlannerProjection {
   title: string;
   weekFocus: string;
-  generatedFrom: string[];
   tasks: PlannerTask[];
+  weeklyBrief?: WeeklyBrief | null;
 }
 
 const areaColor: Record<PlannerTask['area'], string> = {
-  Product: 'border-emerald-500 bg-emerald-500/5',
-  Health: 'border-amber-500 bg-amber-500/5',
-  Family: 'border-rose-500 bg-rose-500/5',
-  Admin: 'border-slate-500 bg-slate-500/5',
-  AI: 'border-blue-500 bg-blue-500/5',
-  Business: 'border-emerald-500 bg-emerald-500/5',
-  Wealth: 'border-violet-500 bg-violet-500/5',
-  Routine: 'border-cyan-500 bg-cyan-500/5',
-  Work: 'border-slate-500 bg-slate-500/5',
-  Travel: 'border-sky-500 bg-sky-500/5',
-  Trading: 'border-indigo-500 bg-indigo-500/5',
-  Car: 'border-slate-500 bg-slate-500/5',
-  Politics: 'border-slate-500 bg-slate-500/5',
-  Startup: 'border-blue-500 bg-blue-500/5',
+  Product: 'border-l-emerald-500',
+  Health: 'border-l-amber-500',
+  Family: 'border-l-rose-500',
+  Admin: 'border-l-slate-500',
+  AI: 'border-l-blue-500',
+  Business: 'border-l-emerald-500',
+  Wealth: 'border-l-violet-500',
+  Routine: 'border-l-cyan-500',
+  Work: 'border-l-slate-500',
+  Travel: 'border-l-sky-500',
+  Trading: 'border-l-indigo-500',
+  Car: 'border-l-slate-500',
+  Politics: 'border-l-slate-500',
+  Startup: 'border-l-blue-500',
 };
+
+function projectHref(projectId?: string) {
+  if (!projectId) return '/?view=today';
+  if (projectId === 'health') return '/?view=health';
+  return `/?view=project&project=${encodeURIComponent(projectId)}`;
+}
+
+function formatDate(date: string) {
+  return new Intl.DateTimeFormat('en-AU', {
+    timeZone: 'Australia/Sydney',
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+  }).format(new Date(`${date}T12:00:00+10:00`));
+}
 
 export default function PlannerView() {
   const [projection, setProjection] = useState<PlannerProjection | null>(null);
-  const [assistantReview, setAssistantReview] = useState<AssistantReview | null>(null);
   const [loading, setLoading] = useState(true);
+  const [pendingItemId, setPendingItemId] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  useEffect(() => {
-    const fetchOptions: RequestInit = { cache: 'no-store' };
-    const cacheBust = `t=${Date.now()}`;
-
-    Promise.all([
-      fetch(`/api/planner?${cacheBust}`, fetchOptions).then((res) => res.json()),
-      fetch(`/api/assistant/review?${cacheBust}`, fetchOptions).then((res) => res.json()).catch(() => null),
-    ])
-      .then(([projectionData, assistantReviewData]) => {
-        setProjection(projectionData);
-        setAssistantReview(assistantReviewData);
-      })
-      .finally(() => setLoading(false));
+  const loadPlanner = useCallback(async () => {
+    const response = await fetch(`/api/planner?t=${Date.now()}`, { cache: 'no-store' });
+    if (!response.ok) throw new Error('Planner projection is unavailable.');
+    setProjection(await response.json());
   }, []);
 
+  useEffect(() => {
+    loadPlanner()
+      .catch(() => setProjection(null))
+      .finally(() => setLoading(false));
+  }, [loadPlanner]);
+
+  const weeklyRows = useMemo(() => {
+    if (!projection?.weeklyBrief) return [];
+    const taskById = new Map(projection.tasks.map((task) => [task.id, task]));
+    return projection.weeklyBrief.days
+      .map((day) => ({ day, task: taskById.get(day.taskId) }))
+      .sort((left, right) => (left.task?.date ?? left.day.date).localeCompare(right.task?.date ?? right.day.date));
+  }, [projection]);
+
+  async function refreshPlanner() {
+    setRefreshing(true);
+    try {
+      await fetch('/api/planner/regenerate', { method: 'POST' });
+      await loadPlanner();
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function updatePlannerItem(itemId: string, action: PlannerItemAction) {
+    setPendingItemId(itemId);
+    try {
+      const response = await fetch('/api/planner/items', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemId, action }),
+      });
+      if (!response.ok) throw new Error('Unable to update the task.');
+      await loadPlanner();
+      window.dispatchEvent(new Event('planner-projection-changed'));
+    } finally {
+      setPendingItemId(null);
+    }
+  }
+
   if (loading) {
-    return (
-      <div className="flex h-full items-center justify-center text-on-surface-variant">
-        Loading planner projection...
-      </div>
-    );
+    return <div className="flex h-full items-center justify-center text-on-surface-variant">Loading weekly plan...</div>;
   }
 
   if (!projection) {
-    return (
-      <div className="rounded-lg border border-border bg-surface p-4 text-sm text-on-surface-variant">
-        Planner projection is not available.
-      </div>
-    );
+    return <div className="rounded-lg border border-border bg-surface p-4 text-sm text-on-surface-variant">Weekly plan is not available.</div>;
   }
 
-  const reviewTasks = projection.tasks
-    .filter((task) => task.horizon === 'this-week' || task.status === 'review')
-    .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0))
-    .slice(0, 6);
+  const weeklyBrief = projection.weeklyBrief;
 
   return (
     <div className="flex w-full max-w-[1440px] flex-col gap-4">
-      <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
+      <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
         <section className="rounded-lg border border-border bg-surface p-4 shadow-sm">
-          <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-base font-semibold text-on-surface">This week</h3>
-            <button className="inline-flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm text-on-surface-variant hover:bg-surface-variant">
-              <RefreshCw className="h-4 w-4" />
-              Regenerate
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 border-b border-border pb-4">
+            <div className="w-full min-w-0">
+              <div className="mb-1 flex items-center gap-2 text-primary">
+                <CalendarDays className="h-4 w-4" />
+                <span className="text-xs font-semibold uppercase tracking-wide">AI weekly plan</span>
+              </div>
+              <h2 className="text-xl font-semibold text-on-surface">{weeklyBrief?.title ?? 'Weekly plan'}</h2>
+            </div>
+            <button
+              type="button"
+              onClick={refreshPlanner}
+              disabled={refreshing}
+              title="Refresh the projection from current plan files"
+              className="inline-flex h-9 items-center gap-2 rounded border border-border bg-surface px-3 text-sm text-on-surface-variant hover:bg-active disabled:opacity-50"
+            >
+              <RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
+              Refresh
             </button>
           </div>
-          <div className="grid gap-3 md:grid-cols-2">
-            {projection.tasks.map((task) => (
-              <article key={task.id} className={`rounded-lg border p-3 ${areaColor[task.area]}`}>
-                <div className="flex items-start gap-3">
-                  {task.status === 'done' ? (
-                    <CheckCircle2 className="mt-0.5 h-5 w-5 text-emerald-500" />
-                  ) : (
-                    <Circle className="mt-0.5 h-5 w-5 text-on-surface-variant" />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-medium text-on-surface-variant">{task.area}</span>
-                      <span className="text-xs text-on-surface-variant">/</span>
-                      <span className="text-xs text-on-surface-variant">{task.status}</span>
-                    </div>
-                    <p className="mt-1 text-sm font-medium text-on-surface">{task.title}</p>
-                    <p className="mt-2 text-xs text-on-surface-variant">{task.source}</p>
+
+          <p className="mt-3 text-sm leading-relaxed text-on-surface-variant">
+            {weeklyBrief?.premise ?? projection.weekFocus}
+          </p>
+
+          {weeklyBrief?.constraints?.length ? (
+            <div className="mt-4 border-l-2 border-cyan-500 bg-cyan-500/5 px-3 py-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-cyan-800">Plan conditions</p>
+              <p className="mt-1 text-sm leading-relaxed text-on-surface-variant">{weeklyBrief.constraints.join(' ')}</p>
+            </div>
+          ) : null}
+
+          <div className="mt-4 divide-y divide-border overflow-hidden rounded-lg border border-border">
+            {weeklyRows.map(({ day, task }) => {
+              const scheduledDate = task?.date ?? day.date;
+              const pending = task && pendingItemId === task.id;
+              return (
+                <article key={day.taskId} className={`grid gap-3 border-l-4 bg-surface p-3 sm:grid-cols-[112px_minmax(0,1fr)_auto] ${task ? areaColor[task.area] : 'border-l-slate-300'}`}>
+                  <div>
+                    <p className="text-sm font-semibold text-on-surface">{formatDate(scheduledDate)}</p>
+                    <p className="mt-1 text-xs text-on-surface-variant">Primary project block</p>
                   </div>
-                </div>
-              </article>
-            ))}
+                  <div className="min-w-0">
+                    {task ? (
+                      <>
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-on-surface-variant">
+                          {task.status === 'done' ? <CheckCircle2 className="h-4 w-4 text-emerald-500" /> : <Circle className="h-4 w-4" />}
+                          <span>{task.area}</span>
+                          <span className="rounded border border-border bg-surface-variant px-1.5 py-0.5">{task.status}</span>
+                        </div>
+                        <a href={projectHref(task.projectId)} className="mt-1 block text-sm font-semibold leading-snug text-on-surface hover:text-primary hover:underline">
+                          {task.title}
+                        </a>
+                        <p className="mt-1 text-sm leading-relaxed text-on-surface-variant">{day.whyNow}</p>
+                        {task.detail ? <p className="mt-2 text-xs leading-relaxed text-on-surface-variant">{task.detail}</p> : null}
+                      </>
+                    ) : (
+                      <p className="text-sm text-on-surface-variant">This item is no longer active. Keep the day open or promote a replacement from the project page.</p>
+                    )}
+                  </div>
+                  {task ? (
+                    <div className="flex items-start gap-1 sm:justify-end">
+                      <a
+                        href={projectHref(task.projectId)}
+                        title={`Open ${task.area} project`}
+                        aria-label={`Open ${task.area} project`}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded border border-border bg-surface text-primary hover:bg-active"
+                      >
+                        <ArrowRight className="h-4 w-4" />
+                      </a>
+                      {task.status !== 'done' ? (
+                        <>
+                          <button type="button" title="Mark done" aria-label="Mark done" onClick={() => updatePlannerItem(task.id, 'done')} disabled={pending} className="inline-flex h-8 w-8 items-center justify-center rounded border border-emerald-200 bg-surface text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">
+                            <Check className="h-4 w-4" />
+                          </button>
+                          <button type="button" title="Move to tomorrow" aria-label="Move to tomorrow" onClick={() => updatePlannerItem(task.id, 'move-tomorrow')} disabled={pending} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border bg-surface text-on-surface-variant hover:bg-active disabled:opacity-50">
+                            <ArrowRight className="h-4 w-4" />
+                          </button>
+                          <button type="button" title="Move to later review" aria-label="Move to later review" onClick={() => updatePlannerItem(task.id, 'deprioritize')} disabled={pending} className="inline-flex h-8 w-8 items-center justify-center rounded border border-border bg-surface text-on-surface-variant hover:bg-active disabled:opacity-50">
+                            <Archive className="h-4 w-4" />
+                          </button>
+                        </>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </article>
+              );
+            })}
+            {weeklyRows.length === 0 ? <p className="p-4 text-sm text-on-surface-variant">No weekly recommendation has been prepared yet.</p> : null}
           </div>
         </section>
 
-        <aside className="flex flex-col gap-4">
-          <AssistantActionsPanel assistantReview={assistantReview} reviewTasks={reviewTasks} compact />
-
-          <section className="rounded-lg border border-border bg-surface p-4 shadow-sm">
-            <div className="mb-3 flex items-center gap-2">
-              <Database className="h-4 w-4 text-primary" />
-              <h3 className="text-sm font-semibold text-on-surface">Source boundary</h3>
+        <aside className="rounded-lg border border-border bg-surface p-4 shadow-sm">
+          <div className="mb-4 flex items-start gap-2">
+            <Sparkles className="mt-0.5 h-4 w-4 text-primary" />
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-primary">Decisions shaping this week</p>
+              <p className="mt-1 text-sm leading-relaxed text-on-surface-variant">Only questions that can change the plan belong here.</p>
             </div>
-            <p className="text-sm text-on-surface-variant">
-              This dashboard should read planner state from the headless Personal Vault API. The filesystem remains the private memory store.
-            </p>
-          </section>
-
-          <section className="rounded-lg border border-border bg-surface p-4 shadow-sm">
-            <div className="mb-3 flex items-center gap-2">
-              <Shield className="h-4 w-4 text-primary" />
-              <h3 className="text-sm font-semibold text-on-surface">Inputs</h3>
-            </div>
-            <ul className="space-y-2 text-sm text-on-surface-variant">
-              {projection.generatedFrom.map((source) => (
-                <li key={source} className="flex gap-2">
-                  <span className="mt-2 h-1.5 w-1.5 rounded-full bg-primary" />
-                  <span>{source}</span>
-                </li>
-              ))}
-            </ul>
-          </section>
+          </div>
+          <div className="space-y-3">
+            {(weeklyBrief?.decisions ?? []).map((decision) => (
+              <article key={decision.id} className="rounded-lg border border-border bg-surface-variant p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-on-surface-variant">{decision.projectId}</span>
+                  <span className="rounded border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-xs font-medium text-amber-800">needs input</span>
+                </div>
+                <h3 className="mt-2 text-sm font-semibold leading-snug text-on-surface">{decision.title}</h3>
+                <p className="mt-2 text-sm leading-relaxed text-on-surface-variant">{decision.question}</p>
+                <p className="mt-2 text-xs leading-relaxed text-on-surface-variant">{decision.reason}</p>
+                <p className="mt-3 text-xs font-medium leading-relaxed text-primary">{decision.nextStep}</p>
+                <a href={projectHref(decision.projectId)} className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline">
+                  Open project <ArrowRight className="h-3 w-3" />
+                </a>
+              </article>
+            ))}
+            {(weeklyBrief?.decisions ?? []).length === 0 ? <p className="text-sm text-on-surface-variant">No decisions are blocking this week.</p> : null}
+          </div>
         </aside>
       </div>
     </div>

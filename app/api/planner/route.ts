@@ -6,6 +6,7 @@ import { promisify } from 'util';
 
 const VAULT_ROOT = path.join(process.env.HOME || '', 'personal-vault');
 const DAILY_PROJECTION_PATH = path.join(VAULT_ROOT, 'structured', 'plans', 'daily-projection.json');
+const WEEKLY_BRIEF_PATH = path.join(VAULT_ROOT, 'structured', 'plans', 'weekly-brief.json');
 const execFileAsync = promisify(execFile);
 
 export const runtime = 'nodejs';
@@ -22,6 +23,15 @@ function getSydneyDate() {
 async function readDailyProjection() {
   try {
     const raw = await fs.readFile(DAILY_PROJECTION_PATH, 'utf-8');
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function readWeeklyBrief() {
+  try {
+    const raw = await fs.readFile(WEEKLY_BRIEF_PATH, 'utf-8');
     return JSON.parse(raw);
   } catch {
     return null;
@@ -105,6 +115,7 @@ export async function GET() {
   if (projection) {
     return NextResponse.json({
       ...projection,
+      weeklyBrief: await readWeeklyBrief(),
       sourcePath: 'structured/plans/daily-projection.json',
     });
   }

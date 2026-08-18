@@ -10,7 +10,8 @@
     "import:chatgpt": "node scripts/import-chatgpt-export.mjs",
     "import:health-connect": "node scripts/import-health-connect-export.mjs",
     "audit:health-exercises": "node scripts/audit-health-exercise-library.mjs",
-    "generate:projection": "node scripts/generate-daily-projection.mjs"
+    "generate:projection": "node scripts/generate-daily-projection.mjs",
+    "import:oanda-activity": "node scripts/import-oanda-activity.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

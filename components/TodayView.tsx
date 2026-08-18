@@ -5,9 +5,12 @@ import {
   Activity,
   ArrowLeft,
   ArrowRight,
+  Archive,
   BriefcaseBusiness,
   CalendarDays,
+  Check,
   CheckCircle2,
+  ClipboardList,
   Dumbbell,
   Folder,
   Sparkles,
@@ -19,14 +22,18 @@ import {
 interface PlannerTask {
   id: string;
   title: string;
-  area: 'Product' | 'Health' | 'Family' | 'Admin' | 'AI' | 'Business' | 'Wealth' | 'Routine' | 'Work' | 'Travel' | 'Trading' | 'Car' | 'Politics' | 'Startup';
-  status: 'suggested' | 'planned' | 'done' | 'review';
+  area: 'Calendar' | 'Product' | 'Health' | 'Family' | 'Admin' | 'AI' | 'Business' | 'Wealth' | 'Routine' | 'Work' | 'Travel' | 'Trading' | 'Car' | 'Politics' | 'Startup';
+  status: 'suggested' | 'planned' | 'partial' | 'done' | 'review';
   source: string;
   date?: string;
   horizon?: string;
   projectId?: string;
   priority?: number;
   detail?: string;
+  externalUrl?: string;
+  timeHint?: string;
+  mutable?: boolean;
+  carriedOverFrom?: string;
 }
 
 interface PlannerProjection {
@@ -34,6 +41,19 @@ interface PlannerProjection {
   weekFocus: string;
   generatedFrom: string[];
   tasks: PlannerTask[];
+  contextReview?: {
+    title: string;
+    period: string;
+    summary: string;
+    source: string;
+    priorities: Array<{
+      projectId?: string;
+      area: PlannerTask['area'];
+      title: string;
+      why?: string;
+    }>;
+    recentCaptureTitles: string[];
+  };
 }
 
 interface ResumeData {
@@ -121,6 +141,22 @@ interface DaySnapshot {
       estimatedCalories?: number;
     }>;
   }>;
+  calendarEvents: Array<{
+    id: string;
+    title: string;
+    start: string;
+    end: string;
+    description?: string | null;
+    location?: string | null;
+    url?: string | null;
+    transparency?: 'opaque' | 'transparent' | null;
+  }>;
+  calendarSync: {
+    connected: boolean;
+    syncedAt: string | null;
+    stale: boolean;
+    timeZone: string;
+  };
   pendingQuestions: Array<{
     question: string;
     capturePath: string;
@@ -137,13 +173,22 @@ interface DaySnapshot {
 interface AgendaItem {
   id: string;
   area: PlannerTask['area'];
+  projectId?: string;
   status: PlannerTask['status'];
   title: string;
   details: string[];
   sources: string[];
   priority: number;
   href?: string;
+  external?: boolean;
   timeLabel: string;
+  plannerItems: Array<{
+    id: string;
+    title: string;
+    status: PlannerTask['status'];
+    carriedOverFrom?: string;
+    href?: string;
+  }>;
 }
 
 function formatDashboardDate(dateValue?: string | null) {
@@ -200,6 +245,7 @@ function formatRelativeDay(dateValue: string, todayValue: string) {
 }
 
 const areaIcon: Record<PlannerTask['area'], React.ReactNode> = {
+  Calendar: <CalendarDays className="h-4 w-4 text-blue-600" />,
   Product: <Target className="h-4 w-4 text-emerald-400" />,
   Health: <Dumbbell className="h-4 w-4 text-amber-400" />,
   Family: <Users className="h-4 w-4 text-rose-400" />,
@@ -218,6 +264,7 @@ const areaIcon: Record<PlannerTask['area'], React.ReactNode> = {
 
 const agendaRowClass: Record<PlannerTask['status'], string> = {
   done: 'border-l-4 border-l-emerald-500 bg-emerald-50',
+  partial: 'border-l-4 border-l-amber-500 bg-amber-50',
   planned: 'border-l-4 border-l-blue-500 bg-blue-50',
   suggested: 'border-l-4 border-l-amber-500 bg-amber-50',
   review: 'border-l-4 border-l-violet-500 bg-violet-50',
@@ -225,18 +272,22 @@ const agendaRowClass: Record<PlannerTask['status'], string> = {
 
 const agendaStatusClass: Record<PlannerTask['status'], string> = {
   done: 'border-emerald-200 bg-emerald-100 text-emerald-800',
+  partial: 'border-amber-200 bg-amber-100 text-amber-800',
   planned: 'border-blue-200 bg-blue-100 text-blue-800',
   suggested: 'border-amber-200 bg-amber-100 text-amber-800',
   review: 'border-violet-200 bg-violet-100 text-violet-800',
 };
 
-function projectHref(projectId?: string) {
+function projectHref(projectId?: string, taskId?: string) {
   if (!projectId) return undefined;
   if (projectId === 'health') return '/?view=health';
-  return `/?view=project&project=${encodeURIComponent(projectId)}`;
+  const query = new URLSearchParams({ view: 'project', project: projectId });
+  if (taskId) query.set('task', taskId);
+  return `/?${query.toString()}`;
 }
 
 function statusRank(status: PlannerTask['status']) {
+  if (status === 'partial') return 5;
   if (status === 'planned') return 4;
   if (status === 'suggested') return 3;
   if (status === 'review') return 2;
@@ -244,6 +295,7 @@ function statusRank(status: PlannerTask['status']) {
 }
 
 function dayOrder(area: PlannerTask['area']) {
+  if (area === 'Calendar') return 5;
   if (area === 'Routine') return 10;
   if (area === 'Health') return 20;
   if (area === 'Business' || area === 'AI' || area === 'Product') return 30;
@@ -254,6 +306,7 @@ function dayOrder(area: PlannerTask['area']) {
 }
 
 function timeLabel(area: PlannerTask['area']) {
+  if (area === 'Calendar') return 'Fixed calendar event';
   if (area === 'Routine') return 'Morning / day control';
   if (area === 'Health') return 'Movement / recovery';
   if (area === 'Business' || area === 'AI' || area === 'Product') return 'Focus block';
@@ -261,6 +314,28 @@ function timeLabel(area: PlannerTask['area']) {
   if (area === 'Wealth') return 'Review block';
   if (area === 'Family') return 'Life buffer';
   return 'Later';
+}
+
+function formatCalendarTime(start: string, end: string) {
+  const formatter = new Intl.DateTimeFormat('en-AU', {
+    timeZone: 'Australia/Sydney',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+  return `${formatter.format(new Date(start))} - ${formatter.format(new Date(end))}`;
+}
+
+function formatCalendarSyncLabel(sync: DaySnapshot['calendarSync'] | undefined) {
+  if (!sync?.connected) return null;
+  if (sync.stale) return 'Google Calendar snapshot needs refresh';
+  if (!sync.syncedAt) return 'Google Calendar connected';
+
+  const syncedAt = new Intl.DateTimeFormat('en-AU', {
+    timeZone: sync.timeZone || 'Australia/Sydney',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(sync.syncedAt));
+  return `Google Calendar synced ${syncedAt}`;
 }
 
 export default function TodayView() {
@@ -271,6 +346,7 @@ export default function TodayView() {
   const [daySnapshot, setDaySnapshot] = useState<DaySnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedDate, setSelectedDate] = useState<string>(() => getInitialSelectedDate());
+  const [plannerActionPending, setPlannerActionPending] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -352,10 +428,27 @@ export default function TodayView() {
     const tasks = planner?.tasks ?? [];
     const exact = tasks.filter((task) => task.date === selectedDate);
     if (exact.length > 0) return exact.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
-    return tasks
-      .filter((task) => !task.date && task.horizon !== 'this-week')
-      .sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
+    return [];
   }, [planner, selectedDate]);
+
+  const updatePlannerItem = async (itemId: string, action: 'done' | 'move-tomorrow' | 'deprioritize') => {
+    setPlannerActionPending(itemId);
+    try {
+      const response = await fetch('/api/planner/items', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemId, action }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Unable to update task.');
+      setPlanner(data.projection);
+      window.dispatchEvent(new Event('planner-projection-changed'));
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Unable to update task.');
+    } finally {
+      setPlannerActionPending(null);
+    }
+  };
   const todayDate = healthPlan?.todayDate ?? publishingPlan?.todayDate ?? getSydneyDate();
   const healthDay = healthPlan?.days?.find((day) => day.date === selectedDate) ?? null;
   const healthLink = healthDay ? `/?view=health&day=${healthDay.day}` : '/?view=health';
@@ -364,6 +457,22 @@ export default function TodayView() {
     (selectedDate === todayDate ? publishingPlan?.upcoming ?? null : null);
   const agendaTasks = useMemo(() => {
     const tasks: PlannerTask[] = [];
+    for (const event of daySnapshot?.calendarEvents ?? []) {
+      tasks.push({
+        id: `calendar-${event.id}`,
+        title: event.title,
+        area: 'Calendar',
+        status: 'planned',
+        source: 'Google Calendar',
+        date: selectedDate,
+        horizon: 'today',
+        priority: 140,
+        detail: [event.description, event.location].filter(Boolean).join(' / ') || 'Fixed calendar event.',
+        externalUrl: event.url || undefined,
+        timeHint: formatCalendarTime(event.start, event.end),
+      });
+    }
+
     if (healthDay) {
       tasks.push({
         id: `health-plan-${healthDay.day}`,
@@ -382,15 +491,17 @@ export default function TodayView() {
     for (const [index, activity] of (daySnapshot?.healthActivities ?? []).entries()) {
       tasks.push({
         id: `health-activity-${selectedDate}-${index}`,
-        title: `Health logged: ${activity.summary}`,
+        title: `${activity.status === 'partial' ? 'Health partly completed' : 'Health logged'}: ${activity.summary}`,
         area: 'Health',
-        status: 'done',
+        status: activity.status === 'partial' ? 'partial' : 'done',
         source: activity.rawPath || 'structured/health/activity-log.jsonl',
         date: selectedDate,
         horizon: 'history',
         priority: 94,
         projectId: 'health',
-        detail: activity.calories
+        detail: activity.status === 'partial'
+          ? `${activity.summary}. The remaining round is not marked as complete.`
+          : activity.calories
           ? activity.caloriesQuality === 'unverified'
             ? `Fitbit energy via Health Connect: ~${activity.calories} kcal (unverified; not used for calorie balance).`
             : `Estimated activity energy: ~${activity.calories} kcal.`
@@ -455,8 +566,8 @@ export default function TodayView() {
 
     const byArea = new Map<string, AgendaItem>();
     for (const task of tasks) {
-      const key = task.projectId || task.area;
-      const href = task.id.startsWith('health-plan-') ? healthLink : projectHref(task.projectId);
+      const key = task.area === 'Calendar' ? task.id : task.projectId || task.area;
+      const href = task.externalUrl || (task.id.startsWith('health-plan-') ? healthLink : projectHref(task.projectId, task.mutable ? task.id : undefined));
       const existing = byArea.get(key);
       const details = [task.detail || task.title].filter(Boolean);
       const sources = [task.source].filter(Boolean);
@@ -465,13 +576,22 @@ export default function TodayView() {
         byArea.set(key, {
           id: key,
           area: task.area,
+          projectId: task.projectId,
           status: task.status,
           title: task.title,
           details,
           sources,
           priority: task.priority ?? 0,
           href,
-          timeLabel: timeLabel(task.area),
+          external: Boolean(task.externalUrl),
+          timeLabel: task.timeHint || timeLabel(task.area),
+          plannerItems: task.mutable ? [{
+            id: task.id,
+            title: task.title,
+            status: task.status,
+            carriedOverFrom: task.carriedOverFrom,
+            href: projectHref(task.projectId, task.id),
+          }] : [],
         });
         continue;
       }
@@ -491,9 +611,26 @@ export default function TodayView() {
       for (const source of sources) {
         if (!existing.sources.includes(source)) existing.sources.push(source);
       }
+      if (task.mutable && !existing.plannerItems.some((item) => item.id === task.id)) {
+          existing.plannerItems.push({
+            id: task.id,
+            title: task.title,
+            status: task.status,
+            carriedOverFrom: task.carriedOverFrom,
+            href: projectHref(task.projectId, task.id),
+        });
+      }
     }
 
-    return Array.from(byArea.values()).sort((a, b) => {
+    const agenda = Array.from(byArea.values());
+    for (const item of agenda) {
+      if (item.plannerItems.length > 1) {
+        item.title = `${item.area}: ${item.plannerItems.length} current commitments`;
+        item.href = projectHref(item.projectId);
+      }
+    }
+
+    return agenda.sort((a, b) => {
       const order = dayOrder(a.area) - dayOrder(b.area);
       if (order !== 0) return order;
       return b.priority - a.priority;
@@ -519,6 +656,8 @@ export default function TodayView() {
   const canGoPrevious = selectedDate > dateBounds.min;
   const canGoNext = selectedDate < dateBounds.max;
   const relativeDayLabel = formatRelativeDay(selectedDate, todayDate);
+  const contextReview = selectedDate === todayDate ? planner?.contextReview : null;
+  const calendarSyncLabel = formatCalendarSyncLabel(daySnapshot?.calendarSync);
   const dateNavButtonClass =
     'inline-flex h-7 min-w-[68px] items-center justify-center gap-1 rounded border border-border bg-surface px-2 text-xs font-medium text-on-surface-variant hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40';
   const navigateDate = (dateValue: string) => {
@@ -585,8 +724,48 @@ export default function TodayView() {
                 </div>
                 <h2 className="text-xl font-semibold text-on-surface">Today console</h2>
                 <p className="text-sm text-on-surface-variant">What changed, what is planned, and what needs a decision.</p>
+                {calendarSyncLabel ? (
+                  <p className={`mt-2 text-xs font-medium ${daySnapshot?.calendarSync.stale ? 'text-amber-700' : 'text-emerald-700'}`}>
+                    {calendarSyncLabel}
+                  </p>
+                ) : null}
               </div>
             </div>
+
+            {contextReview ? (
+              <section className="mb-4 border-y border-primary/15 bg-active px-4 py-3">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 text-primary">
+                      <ClipboardList className="h-4 w-4" />
+                      <h3 className="text-sm font-semibold">{contextReview.title}</h3>
+                    </div>
+                    <p className="mt-1 text-sm leading-relaxed text-on-surface-variant">{contextReview.summary}</p>
+                    {contextReview.priorities.length > 0 ? (
+                      <ul className="mt-2 space-y-1 text-sm text-on-surface">
+                        {contextReview.priorities.map((priority) => (
+                          <li key={`${priority.projectId}-${priority.title}`}>
+                            <span className="font-medium">{priority.area}:</span>{' '}
+                            {priority.projectId ? (
+                              <a href={projectHref(priority.projectId)} className="hover:text-primary hover:underline">{priority.title}</a>
+                            ) : priority.title}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    {contextReview.recentCaptureTitles.length > 0 ? (
+                      <p className="mt-2 text-xs text-on-surface-variant">
+                        Recent discussion: {contextReview.recentCaptureTitles.join(' · ')}
+                      </p>
+                    ) : null}
+                  </div>
+                  <a href="/?view=planner" className="inline-flex h-8 shrink-0 items-center justify-center gap-1 rounded border border-primary/30 bg-surface px-3 text-xs font-medium text-primary hover:bg-hover">
+                    Review plan
+                    <ArrowRight className="h-3.5 w-3.5" />
+                  </a>
+                </div>
+              </section>
+            ) : null}
 
             <div className="mb-4 rounded-lg border border-border bg-surface-variant p-3">
               <div className="mb-3 flex items-center gap-2">
@@ -628,7 +807,12 @@ export default function TodayView() {
                       </div>
                       <div className="min-w-0">
                         {task.href ? (
-                          <a href={task.href} className="text-sm font-semibold leading-snug text-on-surface hover:text-primary hover:underline">
+                          <a
+                            href={task.href}
+                            target={task.external ? '_blank' : undefined}
+                            rel={task.external ? 'noreferrer' : undefined}
+                            className="text-sm font-semibold leading-snug text-on-surface hover:text-primary hover:underline"
+                          >
                             {task.title}
                           </a>
                         ) : (
@@ -640,13 +824,65 @@ export default function TodayView() {
                           ))}
                         </div>
                         <p className="mt-2 truncate text-xs text-on-surface-variant">{task.sources.join(' + ')}</p>
+                        {task.plannerItems.length > 0 ? (
+                          <div className="mt-3 space-y-2 border-t border-border pt-3">
+                            {task.plannerItems.map((item) => (
+                              <div key={item.id} className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                                <div className="min-w-0 text-on-surface-variant">
+                                  {item.href ? (
+                                    <a href={item.href} className="font-medium text-on-surface hover:text-primary hover:underline">{item.title}</a>
+                                  ) : (
+                                    <span className="font-medium text-on-surface">{item.title}</span>
+                                  )}
+                                  {item.carriedOverFrom ? <span> · carried from {item.carriedOverFrom}</span> : null}
+                                </div>
+                                <div className="flex shrink-0 items-center gap-1">
+                                  {item.status !== 'done' ? (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => updatePlannerItem(item.id, 'done')}
+                                        disabled={plannerActionPending === item.id}
+                                        className="inline-flex h-7 items-center gap-1 rounded border border-emerald-200 bg-surface px-2 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+                                      >
+                                        <Check className="h-3.5 w-3.5" /> Done
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => updatePlannerItem(item.id, 'move-tomorrow')}
+                                        disabled={plannerActionPending === item.id}
+                                        className="inline-flex h-7 items-center rounded border border-border bg-surface px-2 text-on-surface-variant hover:bg-active disabled:opacity-50"
+                                      >
+                                        Tomorrow
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => updatePlannerItem(item.id, 'deprioritize')}
+                                        disabled={plannerActionPending === item.id}
+                                        className="inline-flex h-7 items-center gap-1 rounded border border-border bg-surface px-2 text-on-surface-variant hover:bg-active disabled:opacity-50"
+                                      >
+                                        <Archive className="h-3.5 w-3.5" /> Later
+                                      </button>
+                                    </>
+                                  ) : (
+                                    <span className="inline-flex h-7 items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-2 font-medium text-emerald-700">
+                                      <Check className="h-3.5 w-3.5" /> Done
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
                       </div>
                       {task.href ? (
                         <a
                           href={task.href}
+                          target={task.external ? '_blank' : undefined}
+                          rel={task.external ? 'noreferrer' : undefined}
                           className="inline-flex h-8 shrink-0 items-center justify-center gap-1 self-start rounded border border-border bg-surface px-3 text-xs font-medium text-primary hover:bg-active"
                         >
-                          Open
+                          {task.external ? 'Calendar' : 'Open'}
                           <ArrowRight className="h-3.5 w-3.5" />
                         </a>
                       ) : null}

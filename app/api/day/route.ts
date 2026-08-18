@@ -2,6 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import fsp from 'fs/promises';
 import path from 'path';
 import { readHealthConnectActivityLog } from '@/lib/healthConnect';
+import {
+  GOOGLE_CALENDAR_SNAPSHOT_RELATIVE_PATH,
+  readGoogleCalendarForDate,
+} from '@/lib/googleCalendarSnapshot';
 
 const VAULT_ROOT = path.join(process.env.HOME || '', 'personal-vault');
 const CAPTURES_INDEX_PATH = path.join(VAULT_ROOT, 'indexes', 'captures.jsonl');
@@ -220,9 +224,10 @@ export async function GET(request: NextRequest) {
         day: '2-digit',
       }).format(new Date());
 
-  const [captures, healthActivities] = await Promise.all([
+  const [captures, healthActivities, calendar] = await Promise.all([
     readCapturesForDate(date),
     readHealthActivitiesForDate(date),
+    readGoogleCalendarForDate(date),
   ]);
   const [reviews, answeredQuestionKeys] = await Promise.all([
     readPendingReviewsForCaptures(captures.map((capture) => capture.path).filter(Boolean) as string[]),
@@ -243,18 +248,24 @@ export async function GET(request: NextRequest) {
 
   const captureTitles = captures.slice(0, 4).map((capture) => capture.title);
   const healthSummary = healthActivities.map((activity) => activity.summary);
+  const calendarSummary = calendar.events.slice(0, 4).map((event) => event.title);
   const changedSummary =
-    captures.length || healthActivities.length
+    captures.length || healthActivities.length || calendar.events.length
       ? [
           captures.length ? `${captures.length} capture(s): ${captureTitles.join(', ')}` : null,
           healthSummary.length ? `Health: ${healthSummary.join('; ')}` : null,
+          calendarSummary.length
+            ? `Calendar: ${calendar.events.length} event(s): ${calendarSummary.join(', ')}`
+            : null,
         ].filter(Boolean).join('. ')
-      : 'No raw captures or structured activity records found for this day yet.';
+      : 'No captures, health records, or calendar events found for this day yet.';
 
   return NextResponse.json({
     date,
     captures,
     healthActivities,
+    calendarEvents: calendar.events,
+    calendarSync: calendar.sync,
     reviews,
     pendingQuestions,
     changedSummary,
@@ -263,6 +274,7 @@ export async function GET(request: NextRequest) {
       'structured/health/activity-log.jsonl',
       'indexes/health-connect-imports.jsonl',
       'indexes/codex-capture-reviews.jsonl',
+      GOOGLE_CALENDAR_SNAPSHOT_RELATIVE_PATH,
     ],
   });
 }

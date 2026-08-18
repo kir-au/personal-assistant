@@ -2,13 +2,13 @@
 
 Goal: use ChatGPT mobile as the capture/conversation interface while Personal Vault remains the private memory backend and Personal Dashboard remains the planning UI.
 
-Core capture principle: raw input stays fluid and the processor proposes derived updates later. See `docs/personal-vault-fluid-capture.md`.
+Core capture principle: raw input stays fluid and the processor proposes derived updates later. The authoritative contract lives in the private `personal-vault-core` repository.
 
 ## Architecture
 
 ChatGPT mobile -> ChatGPT connector -> HTTPS MCP endpoint -> Personal Vault files
 
-The first MCP server is `mcp/personal-vault-server.mjs`. It exposes:
+The compatibility launcher is `mcp/personal-vault-server.mjs`; the authoritative MCP server lives in the private `personal-vault-core` repository. It exposes:
 
 - `capture_note`: save an approved note, task, decision, workout note, image-backed note, or conversation summary as readable Markdown.
 - `capture_note` also creates reviewable proposed actions and returns them to ChatGPT.

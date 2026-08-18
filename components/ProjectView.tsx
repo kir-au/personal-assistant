@@ -7,6 +7,7 @@ import {
   BriefcaseBusiness,
   Car,
   ChartCandlestick,
+  Check,
   ExternalLink,
   FileText,
   Folder,
@@ -18,6 +19,8 @@ import {
   Users,
 } from 'lucide-react';
 import MarkdownModal from './MarkdownModal';
+import OandaTradingPanel from './OandaTradingPanel';
+import StocksMonitorPanel from './StocksMonitorPanel';
 
 interface ProjectViewProps {
   projectId: string;
@@ -141,6 +144,21 @@ interface ProjectTimelineItem {
   notDoneBecause?: string;
   outcome?: string;
   sourcePaths?: string[];
+  mutable?: boolean;
+}
+
+interface ProjectPlanItem {
+  id: string;
+  title: string;
+  status: string;
+  priority: number;
+  date?: string;
+  horizon?: string;
+  detail?: string;
+  why?: string;
+  outcome?: string;
+  source?: string;
+  planPath?: string;
 }
 
 const projects: Record<string, { title: string; icon: React.ReactNode; summary: string; next: string; status: string }> = {
@@ -168,7 +186,7 @@ const projects: Record<string, { title: string; icon: React.ReactNode; summary: 
   wealth: {
     title: 'Wealth',
     icon: <TrendingUp className="h-5 w-5" />,
-    summary: 'Investing, trading, financial planning, risk, and long-term wealth context.',
+    summary: 'Stocks, ETFs, superannuation, tax, investing, financial planning, and long-term wealth context.',
     next: 'Collect source notes before generating action recommendations.',
     status: 'Waiting',
   },
@@ -280,9 +298,26 @@ function timelineType(item: ProjectTimelineItem, today: string) {
 
 function buildProjectTimelineItems(
   project: { next: string },
+  currentPlanItems: ProjectPlanItem[],
   insights: ProjectInsights | null,
   sources: ProjectSources | null
 ): ProjectTimelineItem[] {
+  if (currentPlanItems.length) {
+    return currentPlanItems.map((item) => ({
+      id: item.id,
+      priority: item.priority,
+      date: projectDateValue(item.date),
+      dateLabel: formatProjectDate(item.date) || item.horizon || 'current',
+      status: item.status,
+      title: item.title,
+      plan: item.detail || item.title,
+      why: item.why,
+      outcome: item.outcome,
+      sourcePaths: item.planPath ? [item.planPath] : [],
+      mutable: true,
+    }));
+  }
+
   if (insights?.backlog?.items?.length) {
     return insights.backlog.items
       .slice()
@@ -386,6 +421,9 @@ export default function ProjectView({ projectId }: ProjectViewProps) {
   const [sourcesError, setSourcesError] = useState<string | null>(null);
   const [insights, setInsights] = useState<ProjectInsights | null>(null);
   const [insightsLoading, setInsightsLoading] = useState(false);
+  const [currentPlanItems, setCurrentPlanItems] = useState<ProjectPlanItem[]>([]);
+  const [planLoading, setPlanLoading] = useState(false);
+  const [planActionPending, setPlanActionPending] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<SelectedVaultFile | null>(null);
   const [fileContent, setFileContent] = useState<any>(null);
   const [contentLoading, setContentLoading] = useState(false);
@@ -419,9 +457,22 @@ export default function ProjectView({ projectId }: ProjectViewProps) {
     setSources(null);
     setSourcesError(null);
     setInsights(null);
+    setCurrentPlanItems([]);
     setSelectedTimelineId(null);
     setSelectedFile(null);
     setFileContent(null);
+  }, [projectId]);
+
+  useEffect(() => {
+    setPlanLoading(true);
+    fetch(`/api/projects/${encodeURIComponent(projectId)}/plan`)
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || 'Failed to load current plan');
+        setCurrentPlanItems(Array.isArray(data.items) ? data.items : []);
+      })
+      .catch(() => setCurrentPlanItems([]))
+      .finally(() => setPlanLoading(false));
   }, [projectId]);
 
   useEffect(() => {
@@ -458,8 +509,8 @@ export default function ProjectView({ projectId }: ProjectViewProps) {
   const sourceCount = sources?.conversations.length ?? 0;
   const sourceTitle = sources?.title || project.title;
   const projectTimelineItems = useMemo(
-    () => buildProjectTimelineItems(project, insights, sources),
-    [project.next, insights, sources]
+    () => buildProjectTimelineItems(project, currentPlanItems, insights, sources),
+    [project.next, currentPlanItems, insights, sources]
   );
   const timelineToday = useMemo(() => localDateValue(), []);
   const historyStart = useMemo(() => addDays(timelineToday, -7), [timelineToday]);
@@ -504,6 +555,13 @@ export default function ProjectView({ projectId }: ProjectViewProps) {
       setSelectedTimelineId(preferred.id);
     }
   }, [displayedTimelineItems, selectedTimelineId, timelineToday]);
+
+  useEffect(() => {
+    const taskId = new URLSearchParams(window.location.search).get('task');
+    if (taskId && displayedTimelineItems.some((item) => item.id === taskId)) {
+      setSelectedTimelineId(taskId);
+    }
+  }, [displayedTimelineItems]);
 
   useLayoutEffect(() => {
     if (!selectedTimelineItem || !timelineRef.current) return;
@@ -599,8 +657,29 @@ export default function ProjectView({ projectId }: ProjectViewProps) {
     }
   };
 
+  const updateCurrentPlanItem = async (itemId: string, action: 'done' | 'move-tomorrow' | 'deprioritize') => {
+    setPlanActionPending(itemId);
+    try {
+      const response = await fetch('/api/planner/items', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ itemId, action }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Unable to update commitment.');
+      setCurrentPlanItems((items) => items.map((item) => item.id === itemId ? { ...item, ...data.item } : item));
+      window.dispatchEvent(new Event('planner-projection-changed'));
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Unable to update commitment.');
+    } finally {
+      setPlanActionPending(null);
+    }
+  };
+
   return (
     <div className="flex w-full max-w-[1440px] flex-col gap-4 pb-8">
+      {projectId === 'trading' && <OandaTradingPanel />}
+      {projectId === 'wealth' && <StocksMonitorPanel />}
       <section className="rounded-lg border border-border bg-surface p-4 shadow-sm">
         <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div>
@@ -618,7 +697,7 @@ export default function ProjectView({ projectId }: ProjectViewProps) {
               {project.status}
             </span>
             <span className="rounded border border-primary/30 bg-active px-3 py-1.5 text-xs font-medium text-primary">
-              {displayedTimelineItems.length} item{displayedTimelineItems.length === 1 ? '' : 's'}
+              {planLoading ? 'Loading plan...' : `${displayedTimelineItems.length} item${displayedTimelineItems.length === 1 ? '' : 's'}`}
             </span>
             {!project.system && (
               <button
@@ -730,6 +809,44 @@ export default function ProjectView({ projectId }: ProjectViewProps) {
               </p>
             </div>
           </div>
+
+          {selectedTimelineItem.mutable && (
+            <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border pt-4">
+              {selectedTimelineItem.status !== 'done' ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => updateCurrentPlanItem(selectedTimelineItem.id, 'done')}
+                    disabled={planActionPending === selectedTimelineItem.id}
+                    className="inline-flex h-9 items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-3 text-sm font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"
+                  >
+                    <Check className="h-4 w-4" /> Done
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => updateCurrentPlanItem(selectedTimelineItem.id, 'move-tomorrow')}
+                    disabled={planActionPending === selectedTimelineItem.id}
+                    className="h-9 rounded border border-border bg-surface px-3 text-sm text-on-surface-variant hover:bg-active disabled:opacity-50"
+                  >
+                    Tomorrow
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => updateCurrentPlanItem(selectedTimelineItem.id, 'deprioritize')}
+                    disabled={planActionPending === selectedTimelineItem.id}
+                    className="inline-flex h-9 items-center gap-1 rounded border border-border bg-surface px-3 text-sm text-on-surface-variant hover:bg-active disabled:opacity-50"
+                  >
+                    <Archive className="h-4 w-4" /> Later
+                  </button>
+                </>
+              ) : (
+                <span className="inline-flex h-9 items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-3 text-sm font-medium text-emerald-700">
+                  <Check className="h-4 w-4" /> Done
+                </span>
+              )}
+              <span className="text-xs text-on-surface-variant">Updates this project&apos;s current plan.</span>
+            </div>
+          )}
 
           {Boolean(selectedTimelineItem.sourcePaths?.length) && (
             <div className="mt-4 flex flex-wrap gap-2">

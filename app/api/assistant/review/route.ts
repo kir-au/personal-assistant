@@ -115,6 +115,7 @@ function inferProjectId(entry: CaptureEntry, projects: ProjectRecord[]) {
     health: ['health', 'workout', 'exercise', 'walk', 'run', 'weight', 'shoulder', 'kettlebell'],
     ai: ['ai', 'mcp', 'codex', 'chatgpt', 'vault', 'dashboard', 'capture', 'model', 'api'],
     wealth: ['wealth', 'superannuation', 'tax', 'dividend', 'stock', 'wise', 'investment'],
+    trading: ['trading', 'binance', 'exchange', 'strategy', 'position', 'dry-run'],
     routine: ['routine', 'morning', 'check-in', 'daily', 'food', 'hydration', 'sleep'],
     family: ['family', 'school', 'daughter', 'parenting'],
     travel: ['travel', 'hotel', 'flight', 'vietnam', 'da nang', 'bali'],
@@ -226,7 +227,7 @@ export async function GET() {
 
   const cards: ReviewCard[] = [];
   for (const project of projects) {
-    if (['travel', 'trading', 'car', 'work', 'politics', 'startup'].includes(project.id)) continue;
+    if (['travel', 'car', 'work', 'politics', 'startup'].includes(project.id)) continue;
 
     const capturesForProject = recentByProject.get(project.id) ?? [];
     const sourcesForProject = sourceByProject.get(project.id) ?? [];
@@ -305,7 +306,7 @@ export async function GET() {
     }));
 
   const sortedCards = [...qualityCards, ...cards]
-    .filter((card) => card.priority > 0 || ['health', 'ai', 'business', 'wealth', 'routine'].includes(card.projectId))
+    .filter((card) => card.priority > 0 || ['health', 'ai', 'business', 'wealth', 'trading', 'routine'].includes(card.projectId))
     .sort((a, b) => b.priority - a.priority)
     .slice(0, 8);
 

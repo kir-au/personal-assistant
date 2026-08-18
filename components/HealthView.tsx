@@ -8,6 +8,45 @@ interface ExerciseKey {
   label: string;
 }
 
+interface CalorieCalibrationPlan {
+  title: string;
+  status: string;
+  startDate: string;
+  endDate: string;
+  goal: {
+    date: string;
+    targetWeightKg: number;
+    startingWeightKg: number;
+    guardrailWeeklyLossPercent: { min: number; max: number };
+    note: string;
+  };
+  baseline: {
+    restingEnergyKcalPerDay: number;
+    workingMaintenanceHypothesisKcalPerDay: number;
+    wearableEnergyRule: string;
+  };
+  dailyTarget: {
+    averageIntakeKcal: number;
+    estimatedDeficitKcal: number;
+    intakeRangeKcal: { min: number; max: number };
+    note: string;
+  };
+  dailyCheckIn: string[];
+  weeklyCheckpoints: Array<{
+    label: string;
+    startDate: string;
+    endDate: string;
+    action: string;
+  }>;
+  dailyRecords?: Record<string, DailyCalibrationRecord>;
+}
+
+interface DailyCalibrationRecord {
+  weightKg?: number;
+  intakeKcal?: number;
+  fitbitTotalEnergyKcal?: number;
+}
+
 interface RehabDay {
   day: number;
   date: string;
@@ -72,6 +111,7 @@ interface RehabPlan {
     notes: string[];
   }>;
   activityLog?: HealthActivityEntry[];
+  calorieCalibration?: CalorieCalibrationPlan | null;
 }
 
 interface HealthActivityEntry {
@@ -146,6 +186,9 @@ export default function HealthView() {
   const [moveDate, setMoveDate] = useState('');
   const [movingSession, setMovingSession] = useState(false);
   const [moveMessage, setMoveMessage] = useState('');
+  const [calibrationDrafts, setCalibrationDrafts] = useState<Record<string, DailyCalibrationRecord>>({});
+  const [savingCalibrationDate, setSavingCalibrationDate] = useState<string | null>(null);
+  const [calibrationMessage, setCalibrationMessage] = useState('');
   const [loading, setLoading] = useState(true);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const dayRefs = useRef<Record<number, HTMLDivElement | null>>({});
@@ -153,11 +196,12 @@ export default function HealthView() {
 
   useEffect(() => {
     Promise.all([
-      fetch('/api/health/project').then((res) => res.json()),
+      fetch(`/api/health/project?ts=${Date.now()}`, { cache: 'no-store' }).then((res) => res.json()),
       fetch('/api/health/exercises').then((res) => res.json()).catch(() => ({ exercises: [] })),
     ])
       .then(([planData, exerciseData]: [RehabPlan, ExerciseLibrary]) => {
         setPlan(planData);
+        setCalibrationDrafts(planData.calorieCalibration?.dailyRecords || {});
         setExerciseLibrary(exerciseData.exercises || []);
         const requestedDay = typeof window !== 'undefined'
           ? Number(new URLSearchParams(window.location.search).get('day'))
@@ -205,6 +249,41 @@ export default function HealthView() {
     if (!plan) return null;
     return displayedDays.find((day) => day.day === selectedDayNumber) || plan.today || plan.upcoming || displayedDays[0] || null;
   }, [displayedDays, plan, selectedDayNumber]);
+  const calibrationDates = useMemo(() => {
+    if (!plan?.calorieCalibration) return [];
+    return buildDateRange(plan.calorieCalibration.startDate, plan.calorieCalibration.endDate);
+  }, [plan?.calorieCalibration]);
+
+  const updateCalibrationDraft = (date: string, field: keyof DailyCalibrationRecord, value: string) => {
+    setCalibrationDrafts((current) => ({
+      ...current,
+      [date]: {
+        ...current[date],
+        [field]: value === '' ? undefined : Number(value),
+      },
+    }));
+  };
+
+  const saveCalibrationRecord = async (date: string) => {
+    setSavingCalibrationDate(date);
+    setCalibrationMessage('');
+    try {
+      const response = await fetch('/api/health/calorie-calibration', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date, record: calibrationDrafts[date] || {} }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Unable to save calibration record.');
+      setPlan((current) => current ? { ...current, calorieCalibration: result.calorieCalibration } : current);
+      setCalibrationDrafts(result.calorieCalibration.dailyRecords || {});
+      setCalibrationMessage(`Saved ${formatShortDate(date)}.`);
+    } catch (error) {
+      setCalibrationMessage(error instanceof Error ? error.message : 'Unable to save calibration record.');
+    } finally {
+      setSavingCalibrationDate(null);
+    }
+  };
 
   useLayoutEffect(() => {
     if (!selectedDayNumber || hasFocusedTimelineRef.current) return;
@@ -287,6 +366,96 @@ export default function HealthView() {
 
   return (
     <div className="flex w-full max-w-[1440px] flex-col gap-4 pb-8">
+      {plan.calorieCalibration ? (
+        <section className="rounded-lg border border-amber-300 bg-amber-50 p-4 shadow-sm">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-amber-800">Active calibration</p>
+              <h3 className="mt-1 text-lg font-semibold text-on-surface">{plan.calorieCalibration.title}</h3>
+              <p className="mt-1 text-sm text-on-surface-variant">
+                {formatLongDate(plan.calorieCalibration.startDate)} to {formatLongDate(plan.calorieCalibration.endDate)}. Use weight and intake to calibrate Fitbit; do not discard its activity data.
+              </p>
+            </div>
+            <span className="rounded border border-amber-300 bg-white px-2 py-1 text-xs font-medium text-amber-900">
+              {plan.calorieCalibration.status}
+            </span>
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-4">
+            <CalibrationMetric label="Starting weight" value={`${plan.calorieCalibration.goal.startingWeightKg} kg`} />
+            <CalibrationMetric label="Initial intake average" value={`${plan.calorieCalibration.dailyTarget.averageIntakeKcal} kcal/day`} />
+            <CalibrationMetric label="Maintenance hypothesis" value={`${plan.calorieCalibration.baseline.workingMaintenanceHypothesisKcalPerDay} kcal/day`} />
+            <CalibrationMetric label="Year-end operating target" value={`${plan.calorieCalibration.goal.targetWeightKg} kg`} />
+          </div>
+          <p className="mt-3 text-sm text-on-surface">
+            <strong>Daily:</strong> morning weight, estimated food and alcohol, Fitbit total energy, steps, heart rate, sleep, exercise, and morning alertness. Health Connect export energy remains a separate labelled field.
+          </p>
+          <div className="mt-3 overflow-x-auto rounded border border-amber-200 bg-white">
+            <table className="w-full min-w-[700px] text-left text-xs">
+              <thead className="bg-amber-100 text-on-surface">
+                <tr>
+                  <th className="px-3 py-2 font-semibold">Period</th>
+                  <th className="px-3 py-2 font-semibold">Dates</th>
+                  <th className="px-3 py-2 font-semibold">Decision</th>
+                </tr>
+              </thead>
+              <tbody>
+                {plan.calorieCalibration.weeklyCheckpoints.map((checkpoint) => (
+                  <tr key={checkpoint.label} className="border-t border-amber-100">
+                    <td className="px-3 py-2 font-medium text-on-surface">{checkpoint.label}</td>
+                    <td className="px-3 py-2 text-on-surface-variant">{formatShortDate(checkpoint.startDate)} - {formatShortDate(checkpoint.endDate)}</td>
+                    <td className="px-3 py-2 text-on-surface-variant">{checkpoint.action}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div className="mt-4 overflow-hidden rounded border border-amber-200 bg-white">
+            <div className="border-b border-amber-200 px-3 py-2">
+              <p className="text-sm font-semibold text-on-surface">Daily calibration ledger</p>
+              <p className="mt-0.5 text-xs text-on-surface-variant">Fitbit Total Energy is entered from the Fitbit app. Health Connect export energy is read-only and remains a separate field.</p>
+            </div>
+            <div className="max-h-[560px] overflow-auto">
+              <table className="w-full min-w-[980px] text-left text-xs">
+                <thead className="sticky top-0 bg-amber-100 text-on-surface">
+                  <tr>
+                    <th className="px-3 py-2 font-semibold">Date</th>
+                    <th className="px-3 py-2 font-semibold">Weight kg</th>
+                    <th className="px-3 py-2 font-semibold">Food kcal</th>
+                    <th className="px-3 py-2 font-semibold">Fitbit total kcal</th>
+                    <th className="px-3 py-2 font-semibold">HC export kcal</th>
+                    <th className="px-3 py-2 font-semibold">Fitbit - food</th>
+                    <th className="px-3 py-2 font-semibold">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {calibrationDates.map((date) => {
+                    const record = calibrationDrafts[date] || plan.calorieCalibration?.dailyRecords?.[date] || {};
+                    const deviceEnergy = (activityByDate.get(date) || [])
+                      .filter((entry) => entry.source === 'health-connect')
+                      .reduce((sum, entry) => sum + (entry.calories?.totalEstimatedCalories || 0), 0);
+                    const fitbitMargin = record.fitbitTotalEnergyKcal !== undefined && record.intakeKcal !== undefined
+                      ? record.fitbitTotalEnergyKcal - record.intakeKcal
+                      : null;
+                    return (
+                      <tr key={date} className="border-t border-amber-100">
+                        <td className="whitespace-nowrap px-3 py-2 font-medium text-on-surface">{formatShortDate(date)}</td>
+                        <td className="px-3 py-2"><CalibrationInput value={record.weightKg} onChange={(value) => updateCalibrationDraft(date, 'weightKg', value)} step="0.1" label={`Weight for ${date}`} /></td>
+                        <td className="px-3 py-2"><CalibrationInput value={record.intakeKcal} onChange={(value) => updateCalibrationDraft(date, 'intakeKcal', value)} label={`Food calories for ${date}`} /></td>
+                        <td className="px-3 py-2"><CalibrationInput value={record.fitbitTotalEnergyKcal} onChange={(value) => updateCalibrationDraft(date, 'fitbitTotalEnergyKcal', value)} label={`Fitbit total energy for ${date}`} /></td>
+                        <td className="px-3 py-2 text-on-surface-variant">{deviceEnergy ? `${Math.round(deviceEnergy)} kcal` : '-'}</td>
+                        <td className="px-3 py-2 font-medium text-on-surface">{fitbitMargin === null ? '-' : `${Math.round(fitbitMargin)} kcal`}</td>
+                        <td className="px-3 py-2"><button type="button" onClick={() => saveCalibrationRecord(date)} disabled={savingCalibrationDate === date} className="h-8 rounded border border-amber-400 bg-white px-2.5 text-xs font-medium text-amber-950 hover:bg-amber-100 disabled:opacity-50">{savingCalibrationDate === date ? 'Saving...' : 'Save'}</button></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          {calibrationMessage ? <p className="mt-2 text-xs text-on-surface-variant">{calibrationMessage}</p> : null}
+          <p className="mt-3 text-xs text-on-surface-variant">{plan.calorieCalibration.dailyTarget.note}</p>
+        </section>
+      ) : null}
       <section className="rounded-lg border border-border bg-surface p-4 shadow-sm">
         <div className="mb-3 flex items-center justify-between">
           <div>
@@ -627,6 +796,25 @@ export default function HealthView() {
 
     </div>
   );
+}
+
+function CalibrationMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded border border-amber-200 bg-white p-3">
+      <p className="text-xs font-medium uppercase tracking-wide text-on-surface-variant">{label}</p>
+      <p className="mt-1 text-base font-semibold text-on-surface">{value}</p>
+    </div>
+  );
+}
+
+function CalibrationInput({ value, onChange, step = '1', label }: { value: number | undefined; onChange: (value: string) => void; step?: string; label: string }) {
+  return <input type="number" min="0" step={step} value={value ?? ''} onChange={(event) => onChange(event.target.value)} aria-label={label} className="h-8 w-24 rounded border border-border bg-surface px-2 text-xs text-on-surface" />;
+}
+
+function buildDateRange(startDate: string, endDate: string) {
+  const dates: string[] = [];
+  for (let date = startDate; date <= endDate; date = addCalendarDays(date, 1)) dates.push(date);
+  return dates;
 }
 
 function buildDisplayedDays(plan: RehabPlan): RehabDay[] {
