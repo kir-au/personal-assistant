@@ -34,5 +34,5 @@ Personal Vault is the durable private memory backend. This dashboard is the UI s
 1. Keep Today as the default route.
 2. Keep Vault browsing/search available for inspection.
 3. Build Planner as a generated weekly/today projection from vault context.
-4. Extract repeated vault filesystem logic into a `vault-core`/API boundary.
+4. Extract repeated vault filesystem logic into a Personal Vault API boundary.
 5. Add mobile/PWA surfaces only after the Today and Planner contracts are stable.

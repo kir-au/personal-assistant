@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const dashboardRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const coreServer = process.env.PERSONAL_VAULT_CORE_MCP
-  || path.resolve(dashboardRoot, '..', 'personal-vault-core', 'mcp', 'personal-vault-server.mjs');
+  || path.resolve(dashboardRoot, '..', 'personal-vault', 'mcp', 'personal-vault-server.mjs');
 
 const child = spawn(process.execPath, [coreServer], {
   env: process.env,
