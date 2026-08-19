@@ -2,7 +2,7 @@
 
 > Superseded as a current-state handoff on 19 August 2026. It records the state before the Assistant MCP extraction and namespace cleanup. Current product instructions live in the respective repositories.
 
-Status date: 19 August 2026  
+Status date: 19 August 2026
 Operating model: continuous delivery through evidence gates, without a calendar deadline
 
 ## Purpose
