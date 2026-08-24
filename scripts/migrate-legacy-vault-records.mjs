@@ -49,10 +49,10 @@ async function mutationFor(filePath) {
     mutation: {
       contractVersion: 'personal-vault/v1',
       mutationId: mutationId(key),
-      requestedAt: new Date().toISOString(),
+      requestedAt: capturedAt,
       requestedBy: ACTOR,
       idempotencyKey: key,
-      approval: { kind: 'migration', approvedAt: new Date().toISOString(), approvedBy: ACTOR, evidenceRef: `legacy-filesystem:${relativePath}` },
+      approval: { kind: 'migration', approvedAt: capturedAt, approvedBy: ACTOR, evidenceRef: `legacy-filesystem:${relativePath}` },
       operation: {
         type: 'record.create',
         record: {
@@ -83,20 +83,37 @@ async function main() {
   const client = new PersonalVaultClient();
   try {
     await client.connect();
+    const existingSources = new Set();
+    let cursor;
+    do {
+      const page = await client.list({ ...(cursor ? { cursor } : {}), state: 'active', limit: 100 });
+      for (const record of page.records) {
+        const sourcePath = record.metadata['migration.source-path'];
+        const sourceHash = record.metadata['migration.source-hash'];
+        if (typeof sourcePath === 'string' && typeof sourceHash === 'string') existingSources.add(`${sourcePath}\0${sourceHash}`);
+      }
+      cursor = page.hasMore ? page.nextCursor : null;
+    } while (cursor);
     let created = 0;
-    let replayed = 0;
+    let alreadyPresent = 0;
     for (const entry of entries) {
+      const sourcePath = entry.mutation.operation.record.metadata['migration.source-path'];
+      const sourceHash = entry.mutation.operation.record.metadata['migration.source-hash'];
+      if (existingSources.has(`${sourcePath}\0${sourceHash}`)) {
+        alreadyPresent += 1;
+        continue;
+      }
       const result = await client.create(entry.mutation);
-      if (result.replayed) replayed += 1;
+      if (result.replayed) alreadyPresent += 1;
       else created += 1;
     }
     const projectionPath = path.join(LEGACY_ROOT, 'structured', 'plans', 'daily-projection.json');
     try {
       const projection = JSON.parse(await readFile(projectionPath, 'utf8'));
       await saveTodayProjection(projection, { client, migration: true });
-      console.log(`Imported ${created} records; ${replayed} were already present. Imported the current Today projection as an Assistant-owned projection record.`);
+      console.log(`Imported ${created} records; ${alreadyPresent} were already present. Imported the current Today projection as an Assistant-owned projection record.`);
     } catch (error) {
-      console.log(`Imported ${created} records; ${replayed} were already present. Today projection was not imported: ${error.message}`);
+      console.log(`Imported ${created} records; ${alreadyPresent} were already present. Today projection was not imported: ${error.message}`);
     }
   } finally {
     await client.close().catch(() => {});
