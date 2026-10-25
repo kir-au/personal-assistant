@@ -8,6 +8,7 @@ type ShortlistCandidate = {
   companyName: string;
   exchange: string;
   country: string;
+  quoteCurrency?: string;
   exDate: string;
   daysUntilExDate: number;
   dividendAmount?: number;
@@ -19,6 +20,7 @@ type ShortlistCandidate = {
   sourceUrl?: string;
   sourceRetrievedAt: string;
   researchPriority: 'higher' | 'standard' | 'needs-confirmation';
+  priorityReason?: string;
   reviewSummary: string;
   unresolvedItems: string[];
   marketUrl: string;
@@ -33,7 +35,7 @@ type StocksMonitorData = {
     retrievedAt: string | null;
     generatedAt: string | null;
     timeZone: string;
-    policy: { earliestExDateDays: number; latestExDateDays: number; maximumCandidates: number; watchedMarkets: string[] } | null;
+    policy: { earliestExDateDays: number; latestExDateDays: number; maximumCandidates: number; watchedMarkets: string[]; preferredQuoteCurrencies?: string[] } | null;
     candidates: ShortlistCandidate[];
   } | null;
 };
@@ -102,7 +104,7 @@ export default function StocksMonitorPanel() {
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-primary"><CalendarDays className="h-5 w-5" /><span className="text-xs font-semibold uppercase tracking-wide">Daily stocks research</span></div>
           <h2 className="mt-2 text-xl font-semibold text-on-surface">Shortlist for manual review</h2>
-          <p className="mt-1 w-full max-w-none text-sm text-on-surface-variant">Up to {policy?.maximumCandidates ?? 10} sourced candidates with ex-distribution dates from T+{policy?.earliestExDateDays ?? 2} to T+{policy?.latestExDateDays ?? 9}. This leaves a two-day review buffer plus one week ahead of the ex-date. Research only — not a buy list or trading instruction.</p>
+          <p className="mt-1 w-full max-w-none text-sm text-on-surface-variant">Up to {policy?.maximumCandidates ?? 10} sourced candidates with ex-distribution dates from T+{policy?.earliestExDateDays ?? 2} to T+{policy?.latestExDateDays ?? 9}. This leaves a two-day review buffer plus one week ahead of the ex-date. NOK-traded candidates are shown first when they meet the same evidence and timing screen. Research only — not a buy list or trading instruction.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <button type="button" onClick={() => void load()} className="inline-flex items-center gap-1 rounded border border-border bg-surface px-2.5 py-1.5 text-xs text-on-surface-variant hover:bg-hover"><RefreshCw className="h-3.5 w-3.5" /> Refresh</button>
@@ -125,7 +127,7 @@ export default function StocksMonitorPanel() {
             <div className="flex flex-col gap-3 lg:grid lg:grid-cols-[minmax(220px,1fr)_150px_160px] lg:items-start">
               <div>
                 <div className="flex flex-wrap items-center gap-2"><a href={candidate.marketUrl} target="_blank" rel="noreferrer" className="text-lg font-semibold text-primary hover:underline">{candidate.symbol} <ExternalLink className="inline h-3.5 w-3.5" /></a><span className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${priorityTone(candidate.researchPriority)}`}>{candidate.researchPriority.replace('-', ' ')}</span><span className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${confidenceTone(candidate.confidence)}`}>{candidate.confidence}</span></div>
-                <p className="mt-1 text-sm font-medium text-on-surface">{candidate.companyName}</p><p className="mt-0.5 text-xs text-on-surface-variant">{candidate.exchange} · {candidate.country}</p>
+                <p className="mt-1 text-sm font-medium text-on-surface">{candidate.companyName}</p><p className="mt-0.5 text-xs text-on-surface-variant">{candidate.exchange} · {candidate.country}{candidate.quoteCurrency ? ` · quote ${candidate.quoteCurrency}` : ''}{candidate.priorityReason ? ` · ${candidate.priorityReason}` : ''}</p>
               </div>
               <div><p className="text-[10px] font-semibold uppercase tracking-wide text-on-surface-variant">Ex-distribution</p><p className="mt-1 text-sm font-semibold text-on-surface">{formatDate(candidate.exDate)} · T+{candidate.daysUntilExDate}</p><p className="mt-1 text-xs text-on-surface-variant">{dividendAmount(candidate.dividendAmount, candidate.dividendCurrency)} · paid {formatDate(candidate.paymentDate)}</p></div>
               <div><p className="text-[10px] font-semibold uppercase tracking-wide text-on-surface-variant">Reported yield</p><p className="mt-1 text-sm font-semibold text-on-surface">{candidate.yield ? `${candidate.yield.value.toFixed(1)}%` : 'Unavailable'}</p><p className="mt-1 text-xs text-on-surface-variant">{candidate.yield?.basis === 'forward' ? 'Forward (source)' : candidate.yield ? 'Basis unspecified' : 'Not calculated'}</p></div>

@@ -34,6 +34,7 @@ type MonitorShortlist = {
     latestExDateDays: number;
     maximumCandidates: number;
     watchedMarkets: string[];
+    preferredQuoteCurrencies?: string[];
   };
   candidates?: ShortlistCandidate[];
 };

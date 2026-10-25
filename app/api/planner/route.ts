@@ -3,11 +3,14 @@ import { execFile } from 'child_process';
 import fs from 'fs/promises';
 import path from 'path';
 import { promisify } from 'util';
+import { refreshSourceInventory } from '@/lib/sourceInventoryWorker.mjs';
+import { projectionFreshness } from '@/lib/projectionFreshness.mjs';
 
-const VAULT_ROOT = path.join(process.env.HOME || '', 'personal-vault');
+const VAULT_ROOT = path.resolve(process.env.PERSONAL_VAULT_ROOT || path.join(process.env.HOME || '', 'personal-vault'));
 const DAILY_PROJECTION_PATH = path.join(VAULT_ROOT, 'structured', 'plans', 'daily-projection.json');
-const WEEKLY_BRIEF_PATH = path.join(VAULT_ROOT, 'structured', 'plans', 'weekly-brief.json');
+const CURRENT_PROJECTION_VERSION = 3;
 const execFileAsync = promisify(execFile);
+let regeneration: Promise<void> | null = null;
 
 export const runtime = 'nodejs';
 
@@ -23,15 +26,6 @@ function getSydneyDate() {
 async function readDailyProjection() {
   try {
     const raw = await fs.readFile(DAILY_PROJECTION_PATH, 'utf-8');
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-async function readWeeklyBrief() {
-  try {
-    const raw = await fs.readFile(WEEKLY_BRIEF_PATH, 'utf-8');
     return JSON.parse(raw);
   } catch {
     return null;
@@ -89,25 +83,37 @@ function fallbackProjection() {
 }
 
 function isProjectionStale(projection: any) {
-  return projection?.dates?.today !== getSydneyDate();
+  return projection?.dates?.today !== getSydneyDate()
+    || projection?.projectionVersion !== CURRENT_PROJECTION_VERSION;
 }
 
 async function regenerateDailyProjection() {
+  if (regeneration) return regeneration;
   const scriptPath = path.join(process.cwd(), 'scripts', 'generate-daily-projection.mjs');
-  await execFileAsync(process.execPath, [scriptPath], {
+  regeneration = execFileAsync(process.execPath, [scriptPath], {
     cwd: process.cwd(),
     timeout: 20_000,
     maxBuffer: 1024 * 1024,
-  });
+  }).then(() => undefined).finally(() => { regeneration = null; });
+  return regeneration;
 }
 
 export async function GET() {
   let projection = await readDailyProjection();
-  if (!projection || isProjectionStale(projection)) {
+  const inventoryResult = await refreshSourceInventory(VAULT_ROOT).catch(() => ({ status: 'scan-error' }));
+  let freshness = projectionFreshness(projection, inventoryResult);
+  if (!projection || isProjectionStale(projection) || (freshness.stale && freshness.state === 'source-changed')) {
     try {
       await regenerateDailyProjection();
       projection = await readDailyProjection();
+      freshness = projectionFreshness(projection, inventoryResult);
     } catch (error) {
+      freshness = {
+        ...freshness,
+        state: 'regeneration-error',
+        stale: true,
+        reason: 'Source state was checked, but the Planner projection could not be regenerated.',
+      };
       console.error('Failed to refresh daily projection', error);
     }
   }
@@ -115,8 +121,8 @@ export async function GET() {
   if (projection) {
     return NextResponse.json({
       ...projection,
-      weeklyBrief: await readWeeklyBrief(),
       sourcePath: 'structured/plans/daily-projection.json',
+      freshness,
     });
   }
 

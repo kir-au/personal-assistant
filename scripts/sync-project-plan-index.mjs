@@ -1,7 +1,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 
-const VAULT_ROOT = path.join(process.env.HOME || '', 'personal-vault');
+const VAULT_ROOT = path.resolve(process.env.PERSONAL_VAULT_ROOT || path.join(process.env.HOME || '', 'personal-vault'));
 const PROJECTS_ROOT = path.join(VAULT_ROOT, 'structured', 'projects');
 const OUTPUT_PATH = path.join(VAULT_ROOT, 'structured', 'plans', 'planner-items.json');
 

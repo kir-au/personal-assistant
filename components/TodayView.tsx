@@ -22,7 +22,7 @@ import {
 interface PlannerTask {
   id: string;
   title: string;
-  area: 'Calendar' | 'Product' | 'Health' | 'Family' | 'Admin' | 'AI' | 'Business' | 'Wealth' | 'Routine' | 'Work' | 'Travel' | 'Trading' | 'Car' | 'Politics' | 'Startup';
+  area: 'Calendar' | 'Product' | 'Personal Vault' | 'Health' | 'Family' | 'Admin' | 'AI' | 'Business' | 'Wealth' | 'Routine' | 'Work' | 'Travel' | 'Trading' | 'Car' | 'Politics' | 'Startup';
   status: 'suggested' | 'planned' | 'partial' | 'done' | 'review';
   source: string;
   date?: string;
@@ -41,6 +41,7 @@ interface PlannerProjection {
   weekFocus: string;
   generatedFrom: string[];
   tasks: PlannerTask[];
+  currentState?: CurrentStateSnapshot | null;
   contextReview?: {
     title: string;
     period: string;
@@ -53,7 +54,23 @@ interface PlannerProjection {
       why?: string;
     }>;
     recentCaptureTitles: string[];
+    evidenceNotice?: string;
+    evidenceGaps?: string[];
+    nextDecision?: string;
   };
+}
+
+interface CurrentStateSnapshot {
+  title: string;
+  asOf: string;
+  reviewDate: string;
+  summary: string;
+  hypothesis: string;
+  strategicDomains: string[];
+  evidenceGaps: string[];
+  evidenceNotice: string;
+  nextDecision: string;
+  source: string;
 }
 
 interface ResumeData {
@@ -247,6 +264,7 @@ function formatRelativeDay(dateValue: string, todayValue: string) {
 const areaIcon: Record<PlannerTask['area'], React.ReactNode> = {
   Calendar: <CalendarDays className="h-4 w-4 text-blue-600" />,
   Product: <Target className="h-4 w-4 text-emerald-400" />,
+  'Personal Vault': <Folder className="h-4 w-4 text-cyan-600" />,
   Health: <Dumbbell className="h-4 w-4 text-amber-400" />,
   Family: <Users className="h-4 w-4 text-rose-400" />,
   Admin: <Folder className="h-4 w-4 text-slate-400" />,
@@ -298,7 +316,7 @@ function dayOrder(area: PlannerTask['area']) {
   if (area === 'Calendar') return 5;
   if (area === 'Routine') return 10;
   if (area === 'Health') return 20;
-  if (area === 'Business' || area === 'AI' || area === 'Product') return 30;
+  if (area === 'Business' || area === 'AI' || area === 'Product' || area === 'Personal Vault') return 30;
   if (area === 'Work' || area === 'Admin') return 40;
   if (area === 'Wealth') return 50;
   if (area === 'Family') return 60;
@@ -309,7 +327,7 @@ function timeLabel(area: PlannerTask['area']) {
   if (area === 'Calendar') return 'Fixed calendar event';
   if (area === 'Routine') return 'Morning / day control';
   if (area === 'Health') return 'Movement / recovery';
-  if (area === 'Business' || area === 'AI' || area === 'Product') return 'Focus block';
+  if (area === 'Business' || area === 'AI' || area === 'Product' || area === 'Personal Vault') return 'Focus block';
   if (area === 'Work' || area === 'Admin') return 'Admin block';
   if (area === 'Wealth') return 'Review block';
   if (area === 'Family') return 'Life buffer';
@@ -426,7 +444,11 @@ export default function TodayView() {
 
   const plannedTasks = useMemo(() => {
     const tasks = planner?.tasks ?? [];
-    const exact = tasks.filter((task) => task.date === selectedDate);
+    // Health is resolved from /api/health/project below. Do not let an older
+    // generated projection create a second, stale Health commitment here.
+    const exact = tasks.filter(
+      (task) => task.date === selectedDate && task.projectId !== 'health' && task.area !== 'Health'
+    );
     if (exact.length > 0) return exact.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0));
     return [];
   }, [planner, selectedDate]);
@@ -741,6 +763,11 @@ export default function TodayView() {
                       <h3 className="text-sm font-semibold">{contextReview.title}</h3>
                     </div>
                     <p className="mt-1 text-sm leading-relaxed text-on-surface-variant">{contextReview.summary}</p>
+                    {contextReview.evidenceNotice ? (
+                      <p className="mt-2 text-sm font-medium leading-relaxed text-on-surface">
+                        {contextReview.evidenceNotice}
+                      </p>
+                    ) : null}
                     {contextReview.priorities.length > 0 ? (
                       <ul className="mt-2 space-y-1 text-sm text-on-surface">
                         {contextReview.priorities.map((priority) => (
@@ -758,9 +785,22 @@ export default function TodayView() {
                         Recent discussion: {contextReview.recentCaptureTitles.join(' · ')}
                       </p>
                     ) : null}
+                    {contextReview.nextDecision ? (
+                      <p className="mt-3 border-l-2 border-primary pl-3 text-sm font-medium text-on-surface">
+                        {contextReview.nextDecision}
+                      </p>
+                    ) : null}
+                    {contextReview.evidenceGaps?.length ? (
+                      <details className="mt-3 text-sm text-on-surface-variant">
+                        <summary className="cursor-pointer font-medium text-primary">Evidence still to reconcile</summary>
+                        <ol className="mt-2 list-decimal space-y-1 pl-5">
+                          {contextReview.evidenceGaps.map((gap) => <li key={gap}>{gap}</li>)}
+                        </ol>
+                      </details>
+                    ) : null}
                   </div>
-                  <a href="/?view=planner" className="inline-flex h-8 shrink-0 items-center justify-center gap-1 rounded border border-primary/30 bg-surface px-3 text-xs font-medium text-primary hover:bg-hover">
-                    Review plan
+                  <a href={`/?view=vault&file=${encodeURIComponent(contextReview.source)}`} className="inline-flex h-8 shrink-0 items-center justify-center gap-1 rounded border border-primary/30 bg-surface px-3 text-xs font-medium text-primary hover:bg-hover">
+                    Open evidence
                     <ArrowRight className="h-3.5 w-3.5" />
                   </a>
                 </div>

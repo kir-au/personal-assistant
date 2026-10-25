@@ -1,6 +1,7 @@
 import fsp from 'fs/promises';
 import path from 'path';
 import { readLatestHealthScheduleEvents, scheduleKey } from '@/lib/healthSchedule';
+import { completionKey, readLatestHealthCompletionEvents } from '@/lib/healthCompletion';
 
 const VAULT_ROOT = path.join(process.env.HOME || '', 'personal-vault');
 const HEALTH_ROOT = path.join(VAULT_ROOT, 'structured', 'health');
@@ -37,8 +38,11 @@ export interface HealthPlanDay {
   planStatus?: string;
   sourcePath?: string;
   sourceDay?: number;
+  sessionId?: string;
   scheduledFromDate?: string;
   scheduleUpdatedAt?: string;
+  carriedFromDate?: string;
+  completedDate?: string;
 }
 
 export interface HealthPlanSummary {
@@ -55,6 +59,7 @@ export interface HealthPlanSummary {
   days: HealthPlanDay[];
   notes: string[];
   exerciseKey: Array<{ code: string; label: string }>;
+  carryForwardFrom?: string;
 }
 
 function getSydneyDate() {
@@ -202,7 +207,7 @@ function normalizeRecurringPlan(plan: any, sourcePath: string): HealthPlanSummar
       const rounds = Number(session.rounds || schedule.rounds || 4);
       const durationMin = Number(session.durationMin || schedule.durationMin || 20);
       const exercises = Array.isArray(session.exercises) ? session.exercises : [];
-      const exercisePlan = exercises.map((exercise: any, index: number) => {
+      const exercisePlan = exercises.map((exercise: any) => {
         const baseReps = Number(exercise.baseReps || exercise.reps || 0);
         const reps = exercise.progression === 'press'
           ? Number(phase.pressReps || baseReps)
@@ -210,18 +215,20 @@ function normalizeRecurringPlan(plan: any, sourcePath: string): HealthPlanSummar
         const side = exercise.perSide
           ? '/side'
           : exercise.alternateSides
-            ? ' (alternate side each round)'
+            ? ' (alternate sides)'
             : '';
-        return `${index + 1}. ${exercise.code || exercise.name} ${reps}${side}`;
-      }).join('; ');
+        const load = exercise.load ? ` (${exercise.load})` : '';
+        return `${exercise.code || exercise.name} ${reps}${side}${load}`;
+      }).join(' · ');
 
       days.push({
         day: days.length + 1,
         date,
         label: formatDateLabel(date),
         kind: session.kind || 'kettlebell',
-        title: `${session.title}${phase.label ? ` · ${phase.label}` : ''}`,
-        plan: `${durationMin}-minute EMOM, ${rounds} rounds. ${exercisePlan}.`,
+        // Session IDs and progression labels remain in the plan source; the daily UI shows only executable work.
+        title: '',
+        plan: `${durationMin}-minute EMOM · ${rounds} rounds · ${exercisePlan}`,
         completed: false,
         planId: plan.id,
         projectId: plan.projectId,
@@ -229,6 +236,7 @@ function normalizeRecurringPlan(plan: any, sourcePath: string): HealthPlanSummar
         planStatus: plan.status || 'active',
         sourcePath,
         sourceDay: days.length + 1,
+        sessionId: session.id,
       });
     }
   }
@@ -247,6 +255,9 @@ function normalizeRecurringPlan(plan: any, sourcePath: string): HealthPlanSummar
     days,
     notes: normalizePlanNotes(plan),
     exerciseKey: Array.isArray(plan.exerciseKey) ? plan.exerciseKey : [],
+    carryForwardFrom: typeof schedule.carryForward?.starts === 'string'
+      ? schedule.carryForward.starts
+      : undefined,
   };
 }
 
@@ -257,6 +268,67 @@ function normalizePlan(plan: any, sourcePath: string): HealthPlanSummary {
     return normalizeRecurringPlan(plan, sourcePath);
   }
   return normalizeDailyPlan({ ...plan, days: [] }, sourcePath);
+}
+
+function collapseScheduleCollisions(days: HealthPlanDay[]) {
+  const byDate = new Map<string, HealthPlanDay>();
+
+  for (const day of days) {
+    const current = byDate.get(day.date);
+    if (!current) {
+      byDate.set(day.date, day);
+      continue;
+    }
+
+    // A deliberate move takes that day's single training slot over the regular recurrence.
+    // The original move event remains the source record; this only prevents two commitments
+    // from being rendered for one plan on the same date.
+    const currentWasMoved = Boolean(current.scheduledFromDate);
+    const candidateWasMoved = Boolean(day.scheduledFromDate);
+    if (candidateWasMoved && !currentWasMoved) {
+      byDate.set(day.date, day);
+    }
+  }
+
+  return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function applyCarryForward(days: HealthPlanDay[], todayDate: string, starts: string | undefined) {
+  if (!starts) return days;
+
+  const historical = days.filter((day) => day.date < starts);
+  const managed = days
+    .filter((day) => day.date >= starts)
+    // Preserve the plan's session sequence after a move. Sorting by the current
+    // date would let a later recurring session jump ahead of an earlier one that
+    // was deliberately deferred.
+    .sort((left, right) => Number(left.sourceDay || 0) - Number(right.sourceDay || 0) || left.date.localeCompare(right.date));
+  let occupiedThrough: string | null = null;
+
+  const resolved = managed.map((day) => {
+    const scheduledDate = day.date;
+    const minimumDate = occupiedThrough ? addDays(occupiedThrough, 1) : scheduledDate;
+    const dueDate = scheduledDate <= todayDate ? todayDate : scheduledDate;
+    const effectiveDate = day.completedDate
+      ? day.completedDate
+      : dueDate > minimumDate
+        ? dueDate
+        : minimumDate;
+
+    // A completion recorded out of sequence is historical evidence. It must not
+    // pull the queue backward past an earlier unfinished session.
+    occupiedThrough = !occupiedThrough || effectiveDate > occupiedThrough
+      ? effectiveDate
+      : occupiedThrough;
+    return {
+      ...day,
+      date: effectiveDate,
+      label: formatDateLabel(effectiveDate),
+      carriedFromDate: !day.completedDate && effectiveDate !== scheduledDate ? scheduledDate : undefined,
+    };
+  });
+
+  return [...historical, ...resolved];
 }
 
 async function listHealthPlanFiles() {
@@ -271,7 +343,10 @@ export async function readHealthPlans(options: { includeInactive?: boolean } = {
   const includeInactive = options.includeInactive ?? false;
   const todayDate = getSydneyDate();
   const files = await listHealthPlanFiles();
-  const scheduleEvents = await readLatestHealthScheduleEvents();
+  const [scheduleEvents, completionEvents] = await Promise.all([
+    readLatestHealthScheduleEvents(),
+    readLatestHealthCompletionEvents(),
+  ]);
   const plans: HealthPlanSummary[] = [];
 
   for (const file of files) {
@@ -283,16 +358,36 @@ export async function readHealthPlans(options: { includeInactive?: boolean } = {
       const event = day.sourceDay
         ? scheduleEvents.get(scheduleKey(plan.id, day.sourceDay))
         : null;
-      if (!event) return day;
-      return {
+      const completion = day.sourceDay
+        ? completionEvents.get(completionKey(plan.id, day.sourceDay))
+        : null;
+      // A restart creates a new schedule baseline. Preserve earlier move events as history,
+      // but do not let them displace sessions in the restarted cycle.
+      const scheduledDay = !event || (plan.startDate && event.fromDate < plan.startDate)
+        ? day
+        : {
         ...day,
         date: event.toDate,
         label: formatDateLabel(event.toDate),
         scheduledFromDate: event.fromDate,
         scheduleUpdatedAt: event.created,
       };
+      if (!completion) return scheduledDay;
+      return {
+        ...scheduledDay,
+        completed: true,
+        completionStatus: 'completed',
+        completedDate: completion.completedDate,
+        actual: {
+          ...scheduledDay.actual,
+          summary: completion.source === 'capture-processor'
+            ? 'Recorded complete from a Health capture.'
+            : 'Marked complete in Health Dashboard.',
+        },
+      };
     });
-    plan.days.sort((a, b) => a.date.localeCompare(b.date) || (a.planTitle || '').localeCompare(b.planTitle || ''));
+    plan.days = applyCarryForward(plan.days, todayDate, plan.carryForwardFrom);
+    plan.days = collapseScheduleCollisions(plan.days);
     plan.today = plan.days.find((day) => day.date === todayDate) || null;
     plan.upcoming = plan.days.find((day) => day.date >= todayDate && !day.completed) || null;
     plans.push(plan);

@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { PersonalVaultClient } from '../lib/personal-vault-client.mjs';
 
@@ -11,24 +12,69 @@ const HOST = process.env.MCP_HOST || '127.0.0.1';
 const PORT = Number(process.env.MCP_PORT || process.env.PORT || 8787);
 const MCP_PATH = '/mcp';
 const PUBLIC_URL = (process.env.MCP_PUBLIC_BASE_URL || '').replace(/\/$/, '');
-const AUTH_ENABLED = process.env.MCP_GOOGLE_AUTH === 'true';
+const GOOGLE_AUTH_ENABLED = process.env.MCP_GOOGLE_AUTH === 'true';
+const SERVICE_TOKENS = new Set((process.env.MCP_SERVICE_TOKENS || '').split(',').map((value) => value.trim()).filter(Boolean));
+const AUTH_ENABLED = GOOGLE_AUTH_ENABLED || SERVICE_TOKENS.size > 0;
 const ALLOWED_EMAILS = new Set((process.env.GOOGLE_ALLOWED_EMAILS || '').split(',').map((value) => value.trim().toLowerCase()).filter(Boolean));
+const ALLOWED_DOMAINS = new Set((process.env.GOOGLE_ALLOWED_DOMAINS || '').split(',').map((value) => value.trim().toLowerCase().replace(/^@/, '')).filter(Boolean));
+const CHALLENGE_MODE = (process.env.MCP_AUTH_CHALLENGE_MODE || 'http-401').trim().toLowerCase() === 'in-band' ? 'in-band' : 'http-401';
+const GOOGLE_USERINFO_URL = process.env.GOOGLE_USERINFO_URL || 'https://www.googleapis.com/oauth2/v3/userinfo';
 const OAUTH_SCOPES = ['openid', 'email', 'profile'];
 const attachmentSchema = z.object({ name: z.string().optional(), dataBase64: z.string().optional(), dataUrl: z.string().optional(), alt: z.string().optional(), caption: z.string().optional() });
 
 function today() { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Australia/Sydney', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()); }
 function slug(value) { return String(value).toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 70) || 'capture'; }
 function publicUrl(req) { return PUBLIC_URL || `http://${req?.headers?.host || `localhost:${PORT}`}`; }
-function authError(req) { const base = PUBLIC_URL || `https://${req?.requestInfo?.headers?.host || 'localhost'}`; return { isError: true, content: [{ type: 'text', text: 'Sign in with the allowed Google account before accessing private Vault files.' }], _meta: { 'mcp/www_authenticate': `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource", scope="${OAUTH_SCOPES.join(' ')}"` } }; }
+function challengeValue(host) {
+  const base = PUBLIC_URL || `https://${host || `localhost:${PORT}`}`;
+  return `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource", scope="${OAUTH_SCOPES.join(' ')}"`;
+}
+function authMessage() {
+  return SERVICE_TOKENS.size ? 'Provide a valid service token or sign in with the allowed Google account before accessing private Vault files.' : 'Sign in with the allowed Google account before accessing private Vault files.';
+}
+function authError(req) {
+  const challenge = GOOGLE_AUTH_ENABLED ? { 'mcp/www_authenticate': challengeValue(req?.requestInfo?.headers?.host) } : {};
+  return { isError: true, content: [{ type: 'text', text: authMessage() }], _meta: challenge };
+}
+function bearerToken(header) {
+  const match = /^Bearer\s+(.+)$/i.exec(String(header || ''));
+  return match ? match[1].trim() : null;
+}
+function matchesServiceToken(token) {
+  if (!SERVICE_TOKENS.size) return false;
+  const candidate = Buffer.from(String(token));
+  let matched = false;
+  for (const known of SERVICE_TOKENS) {
+    const expected = Buffer.from(known);
+    if (expected.length === candidate.length && timingSafeEqual(expected, candidate)) matched = true;
+  }
+  return matched;
+}
+function emailAllowed(email) {
+  const value = String(email || '').trim().toLowerCase();
+  if (!value.includes('@')) return false;
+  if (!ALLOWED_EMAILS.size && !ALLOWED_DOMAINS.size) return true;
+  if (ALLOWED_EMAILS.has(value)) return true;
+  return ALLOWED_DOMAINS.has(value.slice(value.lastIndexOf('@') + 1));
+}
+async function tokenAllowed(token) {
+  if (!token) return false;
+  if (matchesServiceToken(token)) return true;
+  if (!GOOGLE_AUTH_ENABLED) return false;
+  const response = await fetch(GOOGLE_USERINFO_URL, { headers: { authorization: `Bearer ${token}` } }).catch(() => null);
+  if (!response?.ok) return false;
+  const claims = await response.json().catch(() => ({}));
+  return emailAllowed(claims.email);
+}
 async function allowed(extra) {
   if (!AUTH_ENABLED) return true;
-  const header = extra?.requestInfo?.headers?.authorization || '';
-  const token = /^Bearer\s+(.+)$/i.exec(String(header))?.[1];
-  if (!token) return false;
-  const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { authorization: `Bearer ${token}` } });
-  if (!response.ok) return false;
-  const email = String((await response.json()).email || '').toLowerCase();
-  return !ALLOWED_EMAILS.size || ALLOWED_EMAILS.has(email);
+  return tokenAllowed(bearerToken(extra?.requestInfo?.headers?.authorization));
+}
+function sendAuthChallenge(res, host) {
+  const headers = { 'content-type': 'application/json' };
+  headers['www-authenticate'] = GOOGLE_AUTH_ENABLED ? challengeValue(host) : 'Bearer';
+  res.writeHead(401, headers);
+  res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32001, message: authMessage() } }));
 }
 async function usingVault(action) { const vault = new PersonalVaultClient(); try { return await action(vault); } finally { await vault.close().catch(() => {}); } }
 function dataForAttachment(attachment) {
@@ -41,7 +87,10 @@ async function capturePath(vault, title) {
   const [year, month] = today().split('-');
   const base = `${today()}-${slug(title)}`;
   const folder = `raw/${year}/${month}`;
-  const files = await vault.list(folder, false, 1000).catch(() => ({ items: [] }));
+  // A missing folder is already represented by the Vault as an empty list.
+  // Transport and authorization failures must remain visible: treating them as
+  // an empty folder could select a name that already exists and overwrite it.
+  const files = await vault.list(folder, false, 1000);
   let suffix = 1;
   let candidate = `${folder}/${base}.md`;
   const used = new Set((files.items || []).map((item) => item.path));
@@ -50,7 +99,7 @@ async function capturePath(vault, title) {
 }
 
 function assistantServer() {
-  const server = new McpServer({ name: 'personal-assistant', version: '0.3.0' }, { instructions: 'Personal Assistant helps interpret a simple Personal Vault folder. Files remain readable Markdown and normal attachments.' });
+  const server = new McpServer({ name: 'personal-assistant', version: '0.4.0' }, { instructions: 'Personal Assistant helps interpret a simple Personal Vault folder. Files remain readable Markdown and normal attachments.' });
   server.registerTool('capture_note', { title: 'capture_note', description: 'Save a readable Markdown note in the Vault.', inputSchema: { input: z.string().min(1), title: z.string().optional(), projectId: z.string().optional(), intent: z.string().optional(), attachments: z.array(attachmentSchema).optional() } }, async ({ input, title, projectId, intent = 'note', attachments = [] }, extra) => {
     if (!(await allowed(extra))) return authError(extra);
     try {
@@ -102,10 +151,14 @@ function assistantServer() {
 const httpServer = createServer(async (req, res) => {
   if (!req.url) return void res.writeHead(400).end('Missing URL');
   const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
-  if (req.method === 'GET' && url.pathname === '/healthz') return void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'ok', server: 'personal-assistant', version: '0.3.0', mcpEndpoint: `${publicUrl(req)}${MCP_PATH}`, storage: 'readable-files', authentication: AUTH_ENABLED ? 'oauth-required' : 'disabled' }));
+  if (req.method === 'GET' && url.pathname === '/healthz') return void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ status: 'ok', server: 'personal-assistant', version: '0.4.0', mcpEndpoint: `${publicUrl(req)}${MCP_PATH}`, storage: 'readable-files', authentication: [GOOGLE_AUTH_ENABLED ? 'google-oauth' : '', SERVICE_TOKENS.size ? `service-token(${SERVICE_TOKENS.size})` : ''].filter(Boolean).join('+') || 'disabled', googleAllowlist: [ALLOWED_EMAILS.size ? `email(${ALLOWED_EMAILS.size})` : '', ALLOWED_DOMAINS.size ? `domain(${ALLOWED_DOMAINS.size})` : ''].filter(Boolean).join('+') || 'any-verified-google-account', challengeMode: AUTH_ENABLED ? CHALLENGE_MODE : 'none' }));
   if (req.method === 'GET' && url.pathname === '/.well-known/oauth-protected-resource') return void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ resource: publicUrl(req), authorization_servers: ['https://accounts.google.com'], scopes_supported: OAUTH_SCOPES }));
   if (req.method === 'OPTIONS' && url.pathname === MCP_PATH) return void res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST, GET, DELETE, OPTIONS', 'Access-Control-Allow-Headers': 'content-type, mcp-session-id, authorization', 'Access-Control-Expose-Headers': 'Mcp-Session-Id' }).end();
   if (url.pathname !== MCP_PATH || !['POST', 'GET', 'DELETE'].includes(req.method || '')) return void res.writeHead(404).end('Not Found');
+  if (AUTH_ENABLED && CHALLENGE_MODE === 'http-401') {
+    const authorized = await tokenAllowed(bearerToken(req.headers.authorization)).catch(() => false);
+    if (!authorized) return void sendAuthChallenge(res, req.headers.host);
+  }
   const server = assistantServer(); const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   res.on('close', () => { transport.close(); server.close(); });
   try { await server.connect(transport); await transport.handleRequest(req, res); } catch (error) { console.error(error); if (!res.headersSent) res.writeHead(500).end('Internal server error'); }

@@ -6,7 +6,6 @@ import { readHealthConnectActivityLog } from '@/lib/healthConnect';
 
 const VAULT_ROOT = path.join(process.env.HOME || '', 'personal-vault');
 const ACTIVITY_LOG_PATH = path.join(VAULT_ROOT, 'structured', 'health', 'activity-log.jsonl');
-const CALORIE_CALIBRATION_PATH = path.join(VAULT_ROOT, 'structured', 'health', 'calorie-deficit-calibration-plan.json');
 const ACTIVITY_LOOKBACK_DAYS = 7;
 
 function getSydneyDate() {
@@ -29,10 +28,7 @@ export async function GET() {
   try {
     const health = await readHealthPlans();
     const primaryPlan = health.plans.find((plan) => plan.projectId === 'shoulder-rehab') || health.plans[0];
-    const [activityLog, calorieCalibration] = await Promise.all([
-      readActivityLog(),
-      readCalorieCalibration(),
-    ]);
+    const activityLog = await readActivityLog();
 
     return NextResponse.json({
       ...(primaryPlan || {}),
@@ -47,7 +43,6 @@ export async function GET() {
       today: health.today,
       upcoming: health.upcoming,
       activityLog,
-      calorieCalibration,
       sourcePath: 'structured/health/*-plan.json',
     });
   } catch (error) {
@@ -58,14 +53,6 @@ export async function GET() {
       },
       { status: 404 }
     );
-  }
-}
-
-async function readCalorieCalibration() {
-  try {
-    return JSON.parse(await fsp.readFile(CALORIE_CALIBRATION_PATH, 'utf-8'));
-  } catch {
-    return null;
   }
 }
 

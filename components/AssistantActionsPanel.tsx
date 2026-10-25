@@ -17,7 +17,7 @@ import type { ReactNode } from 'react';
 export interface AssistantTask {
   id: string;
   title: string;
-  area: 'Product' | 'Health' | 'Family' | 'Admin' | 'AI' | 'Business' | 'Wealth' | 'Routine' | 'Work' | 'Travel' | 'Trading' | 'Car' | 'Politics' | 'Startup';
+  area: 'Product' | 'Personal Vault' | 'Health' | 'Family' | 'Admin' | 'AI' | 'Business' | 'Wealth' | 'Routine' | 'Work' | 'Travel' | 'Trading' | 'Car' | 'Politics' | 'Startup';
   status: 'suggested' | 'planned' | 'done' | 'review';
   source: string;
   date?: string;
@@ -51,6 +51,7 @@ export interface AssistantReview {
 
 const areaIcon: Record<AssistantTask['area'], ReactNode> = {
   Product: <Target className="h-4 w-4 text-emerald-400" />,
+  'Personal Vault': <Folder className="h-4 w-4 text-cyan-600" />,
   Health: <Dumbbell className="h-4 w-4 text-amber-400" />,
   Family: <Users className="h-4 w-4 text-rose-400" />,
   Admin: <Folder className="h-4 w-4 text-slate-400" />,

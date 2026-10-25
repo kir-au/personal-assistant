@@ -11,6 +11,7 @@ import {
   ExternalLink,
   FileText,
   Folder,
+  HardDrive,
   Landmark,
   Plane,
   Repeat,
@@ -21,6 +22,12 @@ import {
 import MarkdownModal from './MarkdownModal';
 import OandaTradingPanel from './OandaTradingPanel';
 import StocksMonitorPanel from './StocksMonitorPanel';
+import {
+  buildProjectTimelineItems,
+  type ProjectInsights,
+  type ProjectPlanItem,
+  type ProjectTimelineItem,
+} from '../lib/projectTimeline';
 
 interface ProjectViewProps {
   projectId: string;
@@ -73,47 +80,6 @@ interface ProjectSources {
   conversations: ProjectSourceConversation[];
 }
 
-interface ProjectInsightWorkstream {
-  title: string;
-  why: string;
-  nextStep: string;
-  sourceTitles?: string[];
-}
-
-interface ProjectInsightAction {
-  title: string;
-  horizon: string;
-  description: string;
-  target: string;
-  sourceTitles?: string[];
-}
-
-interface ProjectInsights {
-  project: string;
-  title: string;
-  summary: string;
-  currentFocus?: string;
-  workstreams?: ProjectInsightWorkstream[];
-  suggestedActions?: ProjectInsightAction[];
-  backlog?: {
-    title: string;
-    goal: string;
-    whyThisMatters: string;
-    items: Array<{
-      id: string;
-      title: string;
-      status: string;
-      priority: number;
-      horizon: string;
-      targetDate?: string;
-      why: string;
-      notDoneBecause: string;
-      desiredOutcome: string;
-      sourcePaths?: string[];
-    }>;
-  };
-}
-
 interface RegistryProject {
   id: string;
   title: string;
@@ -132,36 +98,14 @@ interface SelectedVaultFile {
   mtime: number;
 }
 
-interface ProjectTimelineItem {
-  id: string;
-  priority: number;
-  date?: string;
-  dateLabel: string;
-  status: string;
-  title: string;
-  plan: string;
-  why?: string;
-  notDoneBecause?: string;
-  outcome?: string;
-  sourcePaths?: string[];
-  mutable?: boolean;
-}
-
-interface ProjectPlanItem {
-  id: string;
-  title: string;
-  status: string;
-  priority: number;
-  date?: string;
-  horizon?: string;
-  detail?: string;
-  why?: string;
-  outcome?: string;
-  source?: string;
-  planPath?: string;
-}
-
 const projects: Record<string, { title: string; icon: React.ReactNode; summary: string; next: string; status: string }> = {
+  'personal-vault': {
+    title: 'Personal Vault Core',
+    icon: <HardDrive className="h-5 w-5" />,
+    summary: 'Durable local-first memory: readable source records, capture, indexes, MCP/API, backup, restore, and the contracts consumed by Personal Assistant.',
+    next: 'Review the pre-mortem gate proposal and decide whether it belongs in the Core/Assistant change-approval workflow.',
+    status: 'Active',
+  },
   business: {
     title: 'Business',
     icon: <BriefcaseBusiness className="h-5 w-5" />,
@@ -243,6 +187,7 @@ const projects: Record<string, { title: string; icon: React.ReactNode; summary: 
 
 function iconForProject(icon?: string) {
   switch (icon) {
+    case 'personal-vault': return <HardDrive className="h-5 w-5" />;
     case 'business': return <BriefcaseBusiness className="h-5 w-5" />;
     case 'ai': return <Sparkles className="h-5 w-5" />;
     case 'family': return <Users className="h-5 w-5" />;
@@ -255,20 +200,6 @@ function iconForProject(icon?: string) {
     case 'startup': return <Brain className="h-5 w-5" />;
     default: return <Folder className="h-5 w-5" />;
   }
-}
-
-function formatProjectDate(dateValue?: string) {
-  if (!dateValue) return null;
-  return new Intl.DateTimeFormat('en-AU', {
-    weekday: 'short',
-    day: 'numeric',
-    month: 'short',
-  }).format(new Date(`${dateValue}T00:00:00`));
-}
-
-function projectDateValue(date?: string) {
-  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return undefined;
-  return date;
 }
 
 function addDays(date: string, days: number) {
@@ -294,104 +225,6 @@ function timelineType(item: ProjectTimelineItem, today: string) {
   if (item.date && item.date < today) return 'overdue';
   if (item.date === today) return 'today';
   return 'plan';
-}
-
-function buildProjectTimelineItems(
-  project: { next: string },
-  currentPlanItems: ProjectPlanItem[],
-  insights: ProjectInsights | null,
-  sources: ProjectSources | null
-): ProjectTimelineItem[] {
-  if (currentPlanItems.length) {
-    return currentPlanItems.map((item) => ({
-      id: item.id,
-      priority: item.priority,
-      date: projectDateValue(item.date),
-      dateLabel: formatProjectDate(item.date) || item.horizon || 'current',
-      status: item.status,
-      title: item.title,
-      plan: item.detail || item.title,
-      why: item.why,
-      outcome: item.outcome,
-      sourcePaths: item.planPath ? [item.planPath] : [],
-      mutable: true,
-    }));
-  }
-
-  if (insights?.backlog?.items?.length) {
-    return insights.backlog.items
-      .slice()
-      .sort((a, b) => b.priority - a.priority)
-      .map((item) => ({
-        id: item.id,
-        priority: item.priority,
-        date: projectDateValue(item.targetDate),
-        dateLabel: formatProjectDate(item.targetDate) || item.horizon,
-        status: item.status,
-        title: item.title,
-        plan: item.desiredOutcome,
-        why: item.why,
-        notDoneBecause: item.notDoneBecause,
-        outcome: item.desiredOutcome,
-        sourcePaths: item.sourcePaths,
-      }));
-  }
-
-  if (insights?.suggestedActions?.length) {
-    return insights.suggestedActions.map((action, index) => ({
-      id: `action-${index}-${action.title}`,
-      priority: 100 - index * 10,
-      date: undefined,
-      dateLabel: action.horizon,
-      status: 'suggested',
-      title: action.title,
-      plan: action.description,
-      outcome: action.target,
-      sourcePaths: [],
-    }));
-  }
-
-  if (insights?.workstreams?.length) {
-    return insights.workstreams.map((workstream, index) => ({
-      id: `workstream-${index}-${workstream.title}`,
-      priority: 90 - index * 10,
-      date: undefined,
-      dateLabel: 'this-week',
-      status: 'review',
-      title: workstream.title,
-      plan: workstream.nextStep,
-      why: workstream.why,
-      sourcePaths: [],
-    }));
-  }
-
-  if (sources?.conversations?.length) {
-    return sources.conversations.slice(0, 8).map((conversation, index) => ({
-      id: `source-${conversation.conversationId}`,
-      priority: 90 - index * 5,
-      date: projectDateValue(conversation.vaultDate || undefined),
-      dateLabel: conversation.vaultDate
-        ? formatProjectDate(conversation.vaultDate) || conversation.vaultDate
-        : 'source',
-      status: 'review',
-      title: `Review: ${conversation.title}`,
-      plan: conversation.snippetFromProjectUi || 'Decide whether this discussion should stay as reference or become an active commitment.',
-      why: 'This source is linked to the project, but no current priority item has been promoted from it yet.',
-      notDoneBecause: 'Needs human review before it becomes current work.',
-      outcome: 'Keep as reference, dismiss it, or promote one concrete next step.',
-      sourcePaths: [conversation.rawPath],
-    }));
-  }
-
-  return [{
-    id: 'project-next-step',
-    priority: 100,
-    date: undefined,
-    dateLabel: 'next',
-    status: 'candidate',
-    title: 'Next useful step',
-    plan: project.next,
-  }];
 }
 
 export default function ProjectView({ projectId }: ProjectViewProps) {
@@ -422,6 +255,7 @@ export default function ProjectView({ projectId }: ProjectViewProps) {
   const [insights, setInsights] = useState<ProjectInsights | null>(null);
   const [insightsLoading, setInsightsLoading] = useState(false);
   const [currentPlanItems, setCurrentPlanItems] = useState<ProjectPlanItem[]>([]);
+  const [planError, setPlanError] = useState<string | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
   const [planActionPending, setPlanActionPending] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<SelectedVaultFile | null>(null);
@@ -458,6 +292,7 @@ export default function ProjectView({ projectId }: ProjectViewProps) {
     setSourcesError(null);
     setInsights(null);
     setCurrentPlanItems([]);
+    setPlanError(null);
     setSelectedTimelineId(null);
     setSelectedFile(null);
     setFileContent(null);
@@ -465,13 +300,17 @@ export default function ProjectView({ projectId }: ProjectViewProps) {
 
   useEffect(() => {
     setPlanLoading(true);
+    setPlanError(null);
     fetch(`/api/projects/${encodeURIComponent(projectId)}/plan`)
       .then(async (response) => {
         const data = await response.json();
         if (!response.ok || data.error) throw new Error(data.error || 'Failed to load current plan');
         setCurrentPlanItems(Array.isArray(data.items) ? data.items : []);
       })
-      .catch(() => setCurrentPlanItems([]))
+      .catch((error) => {
+        setCurrentPlanItems([]);
+        setPlanError(error instanceof Error ? error.message : 'Failed to load current plan');
+      })
       .finally(() => setPlanLoading(false));
   }, [projectId]);
 
@@ -509,8 +348,8 @@ export default function ProjectView({ projectId }: ProjectViewProps) {
   const sourceCount = sources?.conversations.length ?? 0;
   const sourceTitle = sources?.title || project.title;
   const projectTimelineItems = useMemo(
-    () => buildProjectTimelineItems(project, currentPlanItems, insights, sources),
-    [project.next, currentPlanItems, insights, sources]
+    () => buildProjectTimelineItems(currentPlanItems, insights, { planUnavailable: Boolean(planError) }),
+    [currentPlanItems, insights, planError]
   );
   const timelineToday = useMemo(() => localDateValue(), []);
   const historyStart = useMemo(() => addDays(timelineToday, -7), [timelineToday]);
@@ -680,6 +519,8 @@ export default function ProjectView({ projectId }: ProjectViewProps) {
     <div className="flex w-full max-w-[1440px] flex-col gap-4 pb-8">
       {projectId === 'trading' && <OandaTradingPanel />}
       {projectId === 'wealth' && <StocksMonitorPanel />}
+      {projectId !== 'wealth' && (
+        <>
       <section className="rounded-lg border border-border bg-surface p-4 shadow-sm">
         <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
           <div>
@@ -697,7 +538,7 @@ export default function ProjectView({ projectId }: ProjectViewProps) {
               {project.status}
             </span>
             <span className="rounded border border-primary/30 bg-active px-3 py-1.5 text-xs font-medium text-primary">
-              {planLoading ? 'Loading plan...' : `${displayedTimelineItems.length} item${displayedTimelineItems.length === 1 ? '' : 's'}`}
+              {planLoading ? 'Loading plan...' : planError ? 'Unavailable' : `${displayedTimelineItems.length} item${displayedTimelineItems.length === 1 ? '' : 's'}`}
             </span>
             {!project.system && (
               <button
@@ -767,7 +608,13 @@ export default function ProjectView({ projectId }: ProjectViewProps) {
             })}
             {!displayedTimelineItems.length && (
               <div className="border-t border-border p-6 text-sm text-on-surface-variant">
-                No completed work in the last 7 days or open priorities in the next 3 weeks.
+                {planLoading
+                  ? 'Loading current plan...'
+                  : planError
+                    ? 'Current plan unavailable. No commitment status can be verified.'
+                    : projectTimelineItems.length
+                      ? 'No items in the displayed date range.'
+                      : 'No current commitments selected.'}
               </div>
             )}
           </div>
@@ -874,7 +721,7 @@ export default function ProjectView({ projectId }: ProjectViewProps) {
             </p>
           </div>
           <span className="w-fit rounded border border-border bg-surface-variant px-3 py-1.5 text-xs text-on-surface-variant">
-            {sourcesLoading ? 'Loading...' : `${sourceCount} source${sourceCount === 1 ? '' : 's'}`}
+            {sourcesLoading ? 'Loading...' : sourcesError ? 'Unavailable' : `${sourceCount} source${sourceCount === 1 ? '' : 's'}`}
           </span>
         </div>
 
@@ -962,6 +809,8 @@ export default function ProjectView({ projectId }: ProjectViewProps) {
           </div>
         </details>
       </section>
+        </>
+      )}
 
       <MarkdownModal
         file={selectedFile}

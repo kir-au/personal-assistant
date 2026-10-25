@@ -1,7 +1,8 @@
 'use client';
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { CalendarClock, CheckCircle2, ExternalLink, Image as ImageIcon, Loader2 } from 'lucide-react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { CalendarClock, ExternalLink, Image as ImageIcon, Loader2, Pause, Play, RotateCcw, SkipForward, X } from 'lucide-react';
 
 interface ExerciseKey {
   code: string;
@@ -32,6 +33,20 @@ interface CalorieCalibrationPlan {
     note: string;
   };
   dailyCheckIn: string[];
+  dailyRhythm?: {
+    longTermWakeGoal: string;
+    observedWakeWindow: string;
+    currentWakeTarget: string;
+    progressionRule: string;
+    morningMovement: string;
+    strengthPauseThrough: string;
+  };
+  consumptionMonitoring?: {
+    status: string;
+    replaces: string;
+    trigger: string;
+    purpose: string;
+  };
   weeklyCheckpoints: Array<{
     label: string;
     startDate: string;
@@ -43,8 +58,19 @@ interface CalorieCalibrationPlan {
 
 interface DailyCalibrationRecord {
   weightKg?: number;
+  weightTrendEligible?: boolean;
+  weightNote?: string;
+  foodLog?: string;
   intakeKcal?: number;
+  intakeComplete?: boolean;
   fitbitTotalEnergyKcal?: number;
+  wakeTime?: string;
+  walkMinutes?: number;
+  coffeeServings?: number;
+  lastCoffeeTime?: string;
+  alcoholDrinks?: number;
+  alcoholKcal?: number;
+  alcoholContext?: string;
 }
 
 interface RehabDay {
@@ -62,8 +88,11 @@ interface RehabDay {
   planStatus?: string;
   sourcePath?: string;
   sourceDay?: number;
+  sessionId?: string;
   scheduledFromDate?: string;
   scheduleUpdatedAt?: string;
+  carriedFromDate?: string;
+  completedDate?: string;
   actual?: {
     summary?: string;
     completed?: ActualExercise[];
@@ -165,6 +194,31 @@ interface ExerciseLibrary {
   exercises: Exercise[];
 }
 
+interface EmomExercise {
+  code: string;
+  name: string;
+  dose: string;
+  how: string;
+  image?: string;
+}
+
+interface EmomRoutine {
+  rounds: number;
+  exercises: EmomExercise[];
+}
+
+interface EmomRunner {
+  day: RehabDay;
+  routine: EmomRoutine;
+  roundIndex: number;
+  exerciseIndex: number;
+  secondsRemaining: number;
+  isRunning: boolean;
+  finished: boolean;
+}
+
+const EMOM_RUNNER_STORAGE_KEY = 'personal-assistant:health:emom-runner';
+
 const kindStyle: Record<string, string> = {
   home: 'border-blue-300 bg-blue-50',
   gym: 'border-emerald-300 bg-emerald-50',
@@ -175,6 +229,7 @@ const kindStyle: Record<string, string> = {
   'run-long': 'border-sky-300 bg-sky-50',
   kettlebell: 'border-cyan-300 bg-cyan-50',
   activity: 'border-emerald-300 bg-emerald-50',
+  status: 'border-slate-300 bg-slate-50',
   plan: 'border-slate-300 bg-slate-50',
 };
 
@@ -185,14 +240,18 @@ export default function HealthView() {
   const [selectedDayNumber, setSelectedDayNumber] = useState<number | null>(null);
   const [moveDate, setMoveDate] = useState('');
   const [movingSession, setMovingSession] = useState(false);
+  const [completingSession, setCompletingSession] = useState<string | null>(null);
+  const [emomRunner, setEmomRunner] = useState<EmomRunner | null>(null);
+  const [isEmomRunnerOpen, setIsEmomRunnerOpen] = useState(false);
   const [moveMessage, setMoveMessage] = useState('');
-  const [calibrationDrafts, setCalibrationDrafts] = useState<Record<string, DailyCalibrationRecord>>({});
-  const [savingCalibrationDate, setSavingCalibrationDate] = useState<string | null>(null);
-  const [calibrationMessage, setCalibrationMessage] = useState('');
   const [loading, setLoading] = useState(true);
   const timelineRef = useRef<HTMLDivElement | null>(null);
   const dayRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const hasFocusedTimelineRef = useRef(false);
+  const hideEmomRunner = () => {
+    setEmomRunner((current) => current ? { ...current, isRunning: false } : current);
+    setIsEmomRunnerOpen(false);
+  };
 
   useEffect(() => {
     Promise.all([
@@ -201,7 +260,6 @@ export default function HealthView() {
     ])
       .then(([planData, exerciseData]: [RehabPlan, ExerciseLibrary]) => {
         setPlan(planData);
-        setCalibrationDrafts(planData.calorieCalibration?.dailyRecords || {});
         setExerciseLibrary(exerciseData.exercises || []);
         const requestedDay = typeof window !== 'undefined'
           ? Number(new URLSearchParams(window.location.search).get('day'))
@@ -217,6 +275,11 @@ export default function HealthView() {
         setMoveDate(initialDay?.date || '');
         const firstTodayCode = extractExerciseCodes(initialDay?.plan || '', exerciseData.exercises || [])[0];
         setSelectedExerciseCode(firstTodayCode || null);
+        const restoredRunner = restoreEmomRunner(planData, exerciseData.exercises || []);
+        if (restoredRunner) {
+          setEmomRunner(restoredRunner);
+          setIsEmomRunnerOpen(true);
+        }
       })
       .finally(() => setLoading(false));
   }, []);
@@ -254,36 +317,27 @@ export default function HealthView() {
     return buildDateRange(plan.calorieCalibration.startDate, plan.calorieCalibration.endDate);
   }, [plan?.calorieCalibration]);
 
-  const updateCalibrationDraft = (date: string, field: keyof DailyCalibrationRecord, value: string) => {
-    setCalibrationDrafts((current) => ({
-      ...current,
-      [date]: {
-        ...current[date],
-        [field]: value === '' ? undefined : Number(value),
-      },
-    }));
-  };
+  useEffect(() => {
+    if (!emomRunner?.isRunning || emomRunner.finished) return;
+    const timer = window.setInterval(() => {
+      setEmomRunner((current) => advanceEmomSecond(current));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [emomRunner?.isRunning, emomRunner?.finished]);
 
-  const saveCalibrationRecord = async (date: string) => {
-    setSavingCalibrationDate(date);
-    setCalibrationMessage('');
-    try {
-      const response = await fetch('/api/health/calorie-calibration', {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ date, record: calibrationDrafts[date] || {} }),
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || 'Unable to save calibration record.');
-      setPlan((current) => current ? { ...current, calorieCalibration: result.calorieCalibration } : current);
-      setCalibrationDrafts(result.calorieCalibration.dailyRecords || {});
-      setCalibrationMessage(`Saved ${formatShortDate(date)}.`);
-    } catch (error) {
-      setCalibrationMessage(error instanceof Error ? error.message : 'Unable to save calibration record.');
-    } finally {
-      setSavingCalibrationDate(null);
-    }
-  };
+  useEffect(() => {
+    if (!emomRunner || typeof window === 'undefined') return;
+    window.localStorage.setItem(EMOM_RUNNER_STORAGE_KEY, JSON.stringify(emomRunner));
+  }, [emomRunner]);
+
+  useEffect(() => {
+    if (!isEmomRunnerOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') hideEmomRunner();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [isEmomRunnerOpen]);
 
   useLayoutEffect(() => {
     if (!selectedDayNumber || hasFocusedTimelineRef.current) return;
@@ -356,6 +410,74 @@ export default function HealthView() {
     }
   };
 
+  const completeSession = async (day: RehabDay) => {
+    if (!plan || !day.planId || !day.sourceDay || day.completed || day.date > plan.todayDate) return false;
+    const sessionKey = `${day.planId}:${day.sourceDay}`;
+    setCompletingSession(sessionKey);
+    setMoveMessage('');
+    try {
+      const response = await fetch('/api/health/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ planId: day.planId, sourceDay: day.sourceDay }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Unable to mark this session complete.');
+
+      const refreshed = await fetch(`/api/health/project?ts=${Date.now()}`, { cache: 'no-store' }).then((res) => res.json()) as RehabPlan;
+      setPlan(refreshed);
+      if (emomRunner && isSameEmomSession(emomRunner.day, day)) {
+        window.localStorage.removeItem(EMOM_RUNNER_STORAGE_KEY);
+        setEmomRunner(null);
+        setIsEmomRunnerOpen(false);
+      }
+      setMoveMessage('Marked complete. The next uncompleted session remains scheduled for its next available day.');
+      return true;
+    } catch (error) {
+      setMoveMessage(error instanceof Error ? error.message : 'Unable to mark this session complete.');
+      return false;
+    } finally {
+      setCompletingSession(null);
+    }
+  };
+
+  const startEmomSession = (day: RehabDay) => {
+    if (emomRunner && isSameEmomSession(emomRunner.day, day)) {
+      setIsEmomRunnerOpen(true);
+      return;
+    }
+    const routine = buildEmomRoutine(day.plan, exerciseLibrary);
+    if (!routine) return;
+    setEmomRunner({
+      day,
+      routine,
+      roundIndex: 0,
+      exerciseIndex: 0,
+      secondsRemaining: 60,
+      isRunning: true,
+      finished: false,
+    });
+    setIsEmomRunnerOpen(true);
+  };
+
+  const markRunnerComplete = async () => {
+    if (!emomRunner) return;
+    const completed = await completeSession(emomRunner.day);
+    if (completed) {
+      window.localStorage.removeItem(EMOM_RUNNER_STORAGE_KEY);
+      setEmomRunner(null);
+      setIsEmomRunnerOpen(false);
+    }
+  };
+  const discardEmomRunner = () => {
+    window.localStorage.removeItem(EMOM_RUNNER_STORAGE_KEY);
+    setEmomRunner(null);
+    setIsEmomRunnerOpen(false);
+  };
+  const runnerExercise = emomRunner
+    ? emomRunner.routine.exercises[emomRunner.exerciseIndex] || null
+    : null;
+
   if (loading) {
     return <div className="flex h-full items-center justify-center text-on-surface-variant">Loading health plan...</div>;
   }
@@ -386,8 +508,35 @@ export default function HealthView() {
             <CalibrationMetric label="Maintenance hypothesis" value={`${plan.calorieCalibration.baseline.workingMaintenanceHypothesisKcalPerDay} kcal/day`} />
             <CalibrationMetric label="Year-end operating target" value={`${plan.calorieCalibration.goal.targetWeightKg} kg`} />
           </div>
+          {plan.calorieCalibration.dailyRhythm ? (
+            <div className="mt-4 grid border-y border-amber-200 py-3 md:grid-cols-3 md:divide-x md:divide-amber-200">
+              <div className="px-3 first:pl-0">
+                <p className="text-xs font-semibold uppercase text-amber-800">Wake progression</p>
+                <p className="mt-1 text-sm font-medium text-on-surface">
+                  {plan.calorieCalibration.dailyRhythm.currentWakeTarget} now, {plan.calorieCalibration.dailyRhythm.longTermWakeGoal} long term
+                </p>
+                <p className="mt-1 text-xs text-on-surface-variant">
+                  Observed: {plan.calorieCalibration.dailyRhythm.observedWakeWindow}. {plan.calorieCalibration.dailyRhythm.progressionRule}
+                </p>
+              </div>
+              <div className="mt-3 px-3 md:mt-0">
+                <p className="text-xs font-semibold uppercase text-amber-800">Movement</p>
+                <p className="mt-1 text-sm font-medium text-on-surface">{plan.calorieCalibration.dailyRhythm.morningMovement}</p>
+                <p className="mt-1 text-xs text-on-surface-variant">
+                  Kettlebell remains paused through {formatLongDate(plan.calorieCalibration.dailyRhythm.strengthPauseThrough)}.
+                </p>
+              </div>
+              <div className="mt-3 px-3 pr-0 md:mt-0">
+                <p className="text-xs font-semibold uppercase text-amber-800">Consumption monitor</p>
+                <p className="mt-1 text-sm font-medium text-on-surface">Log what happened, not whether a reset was passed.</p>
+                <p className="mt-1 text-xs text-on-surface-variant">
+                  {plan.calorieCalibration.consumptionMonitoring?.trigger || 'Record amount, timing, calories, and context when coffee or alcohol is consumed.'}
+                </p>
+              </div>
+            </div>
+          ) : null}
           <p className="mt-3 text-sm text-on-surface">
-            <strong>Daily:</strong> morning weight, estimated food and alcohol, Fitbit total energy, steps, heart rate, sleep, exercise, and morning alertness. Health Connect export energy remains a separate labelled field.
+            <strong>Daily:</strong> morning weight, total intake including alcohol, Fitbit total energy, wake time, light walk, and actual coffee/alcohol use. Health Connect export energy remains a separate labelled field.
           </p>
           <div className="mt-3 overflow-x-auto rounded border border-amber-200 bg-white">
             <table className="w-full min-w-[700px] text-left text-xs">
@@ -412,39 +561,48 @@ export default function HealthView() {
           <div className="mt-4 overflow-hidden rounded border border-amber-200 bg-white">
             <div className="border-b border-amber-200 px-3 py-2">
               <p className="text-sm font-semibold text-on-surface">Daily calibration ledger</p>
-              <p className="mt-0.5 text-xs text-on-surface-variant">Fitbit Total Energy is entered from the Fitbit app. Health Connect export energy is read-only and remains a separate field.</p>
+              <p className="mt-0.5 text-xs text-on-surface-variant">Read-only view of Personal Vault captures and derived values. Add or correct records through Capture, voice, Codex, or MCP. Health Connect energy remains a separate source value and is never added to Fitbit.</p>
             </div>
             <div className="max-h-[560px] overflow-auto">
-              <table className="w-full min-w-[980px] text-left text-xs">
+              <table className="w-full min-w-[1260px] text-left text-xs">
                 <thead className="sticky top-0 bg-amber-100 text-on-surface">
                   <tr>
                     <th className="px-3 py-2 font-semibold">Date</th>
                     <th className="px-3 py-2 font-semibold">Weight kg</th>
-                    <th className="px-3 py-2 font-semibold">Food kcal</th>
-                    <th className="px-3 py-2 font-semibold">Fitbit total kcal</th>
-                    <th className="px-3 py-2 font-semibold">HC export kcal</th>
-                    <th className="px-3 py-2 font-semibold">Fitbit - food</th>
-                    <th className="px-3 py-2 font-semibold">Action</th>
+                    <th className="px-3 py-2 font-semibold">Food log</th>
+                    <th className="px-3 py-2 font-semibold">Food log energy</th>
+                    <th className="px-3 py-2 font-semibold">Fitbit Energy burned</th>
+                    <th className="px-3 py-2 font-semibold">HC source kcal</th>
+                    <th className="px-3 py-2 font-semibold">Estimated deficit (burned - eaten)</th>
                   </tr>
                 </thead>
                 <tbody>
                   {calibrationDates.map((date) => {
-                    const record = calibrationDrafts[date] || plan.calorieCalibration?.dailyRecords?.[date] || {};
+                    const record = plan.calorieCalibration?.dailyRecords?.[date] || {};
                     const deviceEnergy = (activityByDate.get(date) || [])
                       .filter((entry) => entry.source === 'health-connect')
                       .reduce((sum, entry) => sum + (entry.calories?.totalEstimatedCalories || 0), 0);
-                    const fitbitMargin = record.fitbitTotalEnergyKcal !== undefined && record.intakeKcal !== undefined
+                    const fitbitMargin = record.intakeComplete && record.foodLog && record.fitbitTotalEnergyKcal !== undefined && record.intakeKcal !== undefined
                       ? record.fitbitTotalEnergyKcal - record.intakeKcal
                       : null;
                     return (
                       <tr key={date} className="border-t border-amber-100">
                         <td className="whitespace-nowrap px-3 py-2 font-medium text-on-surface">{formatShortDate(date)}</td>
-                        <td className="px-3 py-2"><CalibrationInput value={record.weightKg} onChange={(value) => updateCalibrationDraft(date, 'weightKg', value)} step="0.1" label={`Weight for ${date}`} /></td>
-                        <td className="px-3 py-2"><CalibrationInput value={record.intakeKcal} onChange={(value) => updateCalibrationDraft(date, 'intakeKcal', value)} label={`Food calories for ${date}`} /></td>
-                        <td className="px-3 py-2"><CalibrationInput value={record.fitbitTotalEnergyKcal} onChange={(value) => updateCalibrationDraft(date, 'fitbitTotalEnergyKcal', value)} label={`Fitbit total energy for ${date}`} /></td>
+                        <td className="px-3 py-2">
+                          <span className="font-medium text-on-surface">{record.weightKg ?? '-'}</span>
+                          {record.weightTrendEligible === false ? <p className="mt-1 max-w-36 text-[10px] leading-4 text-amber-800">Excluded from trend: {record.weightNote || 'transient water shift'}</p> : null}
+                        </td>
+                        <td className="max-w-96 px-3 py-2 leading-5 text-on-surface-variant">{record.foodLog || 'No food capture recorded.'}{record.foodLog && !record.intakeComplete ? <p className="mt-1 text-[10px] text-amber-800">Known captures only; later meals may be missing.</p> : null}</td>
+                        <td className="px-3 py-2 font-medium text-on-surface">{record.intakeKcal === undefined ? '-' : `${Math.round(record.intakeKcal)} kcal`}</td>
+                        <td className="px-3 py-2 font-medium text-on-surface">{record.fitbitTotalEnergyKcal === undefined ? '-' : `${Math.round(record.fitbitTotalEnergyKcal)} kcal`}</td>
                         <td className="px-3 py-2 text-on-surface-variant">{deviceEnergy ? `${Math.round(deviceEnergy)} kcal` : '-'}</td>
-                        <td className="px-3 py-2 font-medium text-on-surface">{fitbitMargin === null ? '-' : `${Math.round(fitbitMargin)} kcal`}</td>
-                        <td className="px-3 py-2"><button type="button" onClick={() => saveCalibrationRecord(date)} disabled={savingCalibrationDate === date} className="h-8 rounded border border-amber-400 bg-white px-2.5 text-xs font-medium text-amber-950 hover:bg-amber-100 disabled:opacity-50">{savingCalibrationDate === date ? 'Saving...' : 'Save'}</button></td>
+                        <td className="px-3 py-2 font-medium text-on-surface">
+                          {fitbitMargin === null
+                            ? 'Incomplete food log'
+                            : fitbitMargin >= 0
+                              ? `Estimated deficit: +${Math.round(fitbitMargin)} kcal`
+                              : `Estimated surplus: ${Math.abs(Math.round(fitbitMargin))} kcal`}
+                        </td>
                       </tr>
                     );
                   })}
@@ -452,7 +610,47 @@ export default function HealthView() {
               </table>
             </div>
           </div>
-          {calibrationMessage ? <p className="mt-2 text-xs text-on-surface-variant">{calibrationMessage}</p> : null}
+          <div className="mt-4 overflow-hidden rounded border border-amber-200 bg-white">
+            <div className="border-b border-amber-200 px-3 py-2">
+              <p className="text-sm font-semibold text-on-surface">Daily rhythm and consumption</p>
+              <p className="mt-0.5 text-xs text-on-surface-variant">
+                The old 4PM pass/fail reset is off. Record actual use and context so the review can identify timing, hunger, fatigue, stress, social, or habit patterns.
+              </p>
+            </div>
+            <div className="max-h-[560px] overflow-auto">
+              <table className="w-full min-w-[1320px] text-left text-xs">
+                <thead className="sticky top-0 bg-amber-100 text-on-surface">
+                  <tr>
+                    <th className="px-3 py-2 font-semibold">Date</th>
+                    <th className="px-3 py-2 font-semibold">Wake</th>
+                    <th className="px-3 py-2 font-semibold">Walk min</th>
+                    <th className="px-3 py-2 font-semibold">Coffee</th>
+                    <th className="px-3 py-2 font-semibold">Last coffee</th>
+                    <th className="px-3 py-2 font-semibold">Standard drinks</th>
+                    <th className="px-3 py-2 font-semibold">Alcohol kcal</th>
+                    <th className="px-3 py-2 font-semibold">Why / context</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {calibrationDates.map((date) => {
+                    const record = plan.calorieCalibration?.dailyRecords?.[date] || {};
+                    return (
+                      <tr key={`rhythm-${date}`} className="border-t border-amber-100">
+                        <td className="whitespace-nowrap px-3 py-2 font-medium text-on-surface">{formatShortDate(date)}</td>
+                        <td className="px-3 py-2">{record.wakeTime || '-'}</td>
+                        <td className="px-3 py-2">{record.walkMinutes === undefined ? '-' : `${record.walkMinutes} min`}</td>
+                        <td className="px-3 py-2">{record.coffeeServings ?? '-'}</td>
+                        <td className="px-3 py-2">{record.lastCoffeeTime || '-'}</td>
+                        <td className="px-3 py-2">{record.alcoholDrinks ?? '-'}</td>
+                        <td className="px-3 py-2">{record.alcoholKcal === undefined ? '-' : `${record.alcoholKcal} kcal`}</td>
+                        <td className="max-w-96 px-3 py-2 text-on-surface-variant">{record.alcoholContext || '-'}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
           <p className="mt-3 text-xs text-on-surface-variant">{plan.calorieCalibration.dailyTarget.note}</p>
         </section>
       ) : null}
@@ -493,6 +691,10 @@ export default function HealthView() {
                 && day.planId !== 'activity-log'
                 && day.planId !== 'health-baseline'
               );
+              const canComplete = Boolean(canMove && day.date <= plan.todayDate);
+              const canStart = Boolean(canComplete && buildEmomRoutine(day.plan, exerciseLibrary));
+              const hasStoredEmomRunner = Boolean(emomRunner && isSameEmomSession(emomRunner.day, day));
+              const sessionKey = `${day.planId}:${day.sourceDay}`;
               return (
                 <div
                   key={`${day.date}-${day.day}`}
@@ -528,8 +730,14 @@ export default function HealthView() {
                   </div>
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <p className="font-medium text-on-surface">{day.title}</p>
-                      <p className="mt-1 text-on-surface-variant">{day.plan}</p>
+                      {day.title ? <p className="font-medium text-on-surface">{day.title}</p> : null}
+                      <p className={`${day.title ? 'mt-1 ' : ''}text-on-surface-variant`}>
+                        <ExercisePlanText
+                          planText={day.plan}
+                          exerciseCodes={extractExerciseCodes(day.plan, exerciseLibrary)}
+                          onSelect={(code) => setSelectedExerciseCode(code)}
+                        />
+                      </p>
                       {dayActivities.length > 0 && (
                         <p className="mt-2 rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-800">
                           Logged: {dayActivities.map((entry) => `${entry.source === 'health-connect' ? 'Watch sync' : 'Captured'}: ${entry.summary}`).join(' / ')}
@@ -542,20 +750,6 @@ export default function HealthView() {
                           Plan done: {day.actual.summary}
                         </p>
                       )}
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        {extractExerciseCodes(day.plan, exerciseLibrary).map((code) => (
-                          <button
-                            key={`${day.day}-${code}`}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              setSelectedExerciseCode(code);
-                            }}
-                            className="rounded border border-primary/30 bg-surface px-2 py-0.5 text-xs text-primary hover:bg-active"
-                          >
-                            {code}
-                          </button>
-                        ))}
-                      </div>
                       {isSelected && canMove ? (
                         <div
                           className="mt-3 flex flex-wrap items-center gap-2 border-t border-border pt-3"
@@ -563,14 +757,16 @@ export default function HealthView() {
                         >
                           <CalendarClock className="h-4 w-4 text-primary" />
                           <span className="text-xs font-medium text-on-surface">Move session</span>
-                          <button
-                            type="button"
-                            onClick={() => moveSession(day, plan.todayDate)}
-                            disabled={movingSession || day.date === plan.todayDate}
-                            className="h-8 rounded border border-border bg-surface px-2.5 text-xs text-on-surface hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            Today
-                          </button>
+                          {canStart ? (
+                            <button
+                              type="button"
+                              onClick={() => startEmomSession(day)}
+                              className="inline-flex h-8 items-center gap-1.5 rounded border border-emerald-700 bg-emerald-700 px-3 text-xs font-medium text-white hover:bg-emerald-800"
+                            >
+                              <Play className="h-3.5 w-3.5" />
+                              {hasStoredEmomRunner ? 'Resume' : 'Start'}
+                            </button>
+                          ) : null}
                           <button
                             type="button"
                             onClick={() => moveSession(day, addCalendarDays(plan.todayDate, 1))}
@@ -606,20 +802,28 @@ export default function HealthView() {
                         </div>
                       ) : null}
                     </div>
-                    <span
-                      className={`mt-1 rounded-full border p-1.5 ${
-                        day.completed
-                          ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
-                          : dayActivities.length
+                    {day.kind !== 'status' ? (
+                      <label
+                        className={`mt-1 inline-flex h-7 w-7 items-center justify-center rounded border ${
+                          day.completed
                             ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
-                          : day.completionStatus === 'partial'
-                            ? 'border-amber-300 bg-amber-50 text-amber-700'
-                            : 'border-border text-on-surface-variant'
-                      }`}
-                      title={day.completed || dayActivities.length ? 'Completed/logged activity' : day.completionStatus === 'partial' ? 'Partially logged' : 'Not completed'}
-                    >
-                      <CheckCircle2 className="h-4 w-4" />
-                    </span>
+                            : day.completionStatus === 'partial'
+                              ? 'border-amber-300 bg-amber-50 text-amber-700'
+                              : 'border-border text-on-surface-variant'
+                        }`}
+                        title={day.completed ? 'Completed' : day.completionStatus === 'partial' ? 'Partially logged' : canComplete ? 'Mark this session complete' : 'Future session'}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={day.completed}
+                          disabled={!canComplete || completingSession === sessionKey}
+                          onClick={(event) => event.stopPropagation()}
+                          onChange={() => completeSession(day)}
+                          aria-label={`Mark ${day.planTitle || 'health session'} on ${day.label} complete`}
+                          className="h-4 w-4 accent-emerald-600 disabled:cursor-not-allowed"
+                        />
+                      </label>
+                    ) : null}
                   </div>
                 </div>
               );
@@ -627,6 +831,152 @@ export default function HealthView() {
           </div>
         </div>
       </section>
+
+      {emomRunner && runnerExercise && isEmomRunnerOpen && typeof document !== 'undefined' ? createPortal(
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="emom-runner-title"
+          style={{ position: 'fixed', inset: 0, zIndex: 50, display: 'grid', placeItems: 'center', padding: '1rem' }}
+        >
+          <section
+            className="rounded-lg border border-border bg-surface shadow-2xl"
+            style={{ width: 'min(40rem, calc(100vw - 2rem))', maxHeight: 'calc(100vh - 2rem)', overflowY: 'auto' }}
+          >
+            <header className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Every Minute on the Minute (EMOM)</p>
+                <h2 id="emom-runner-title" className="mt-1 text-xl font-semibold text-on-surface">Kettlebell interval session</h2>
+                <p className="mt-1 text-sm text-on-surface-variant">Start each exercise at the beginning of its minute, then rest for the remaining time.</p>
+              </div>
+              <button
+                type="button"
+                onClick={hideEmomRunner}
+                className="inline-flex h-9 w-9 items-center justify-center rounded border border-border text-on-surface-variant hover:bg-hover"
+                title="Hide session timer"
+                aria-label="Hide session timer"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </header>
+
+            <div className="p-5">
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <div className="flex items-center gap-4 text-sm text-on-surface-variant">
+                  <span>Round <strong className="text-on-surface">{emomRunner.roundIndex + 1} of {emomRunner.routine.rounds}</strong></span>
+                  <span>Exercise <strong className="text-on-surface">{emomRunner.exerciseIndex + 1} of {emomRunner.routine.exercises.length}</strong></span>
+                </div>
+                <p className="text-5xl font-semibold tabular-nums text-on-surface">{formatEmomTime(emomRunner.secondsRemaining)}</p>
+              </div>
+              <div className="mt-5 grid gap-4 rounded-lg border border-emerald-200 bg-emerald-50 p-4 sm:grid-cols-[144px_1fr]">
+                {runnerExercise.image ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={runnerExercise.image.startsWith('http')
+                      ? runnerExercise.image
+                      : `/api/vault-asset/${encodeURIComponent(runnerExercise.image)}`}
+                    alt={runnerExercise.name}
+                    className="h-32 w-full rounded border border-emerald-200 bg-white object-contain"
+                  />
+                ) : (
+                  <div className="flex h-32 items-center justify-center rounded border border-dashed border-emerald-300 bg-white px-3 text-center text-xs text-emerald-900">
+                    No reference image is saved for this exercise.
+                  </div>
+                )}
+                <div>
+                  <p className="text-sm font-semibold text-emerald-900">{runnerExercise.code} · {runnerExercise.name}</p>
+                  <p className="mt-1 text-lg font-medium text-on-surface">Target: {runnerExercise.dose || 'Complete the prescribed work for this minute.'}</p>
+                  <p className="mt-3 text-sm leading-5 text-on-surface-variant">{runnerExercise.how}</p>
+                </div>
+              </div>
+
+              <ol className="mt-5 grid grid-cols-5 gap-2" aria-label="Session exercise order">
+                {emomRunner.routine.exercises.map((exercise, index) => {
+                  const isCurrent = index === emomRunner.exerciseIndex;
+                  const isPast = index < emomRunner.exerciseIndex || emomRunner.finished;
+                  return (
+                    <li
+                      key={exercise.code}
+                      className={`min-h-16 rounded border px-2 py-2 text-xs ${
+                        isCurrent
+                          ? 'border-emerald-600 bg-emerald-50 text-emerald-950'
+                          : isPast
+                            ? 'border-border bg-surface-variant text-on-surface-variant'
+                            : 'border-border bg-surface text-on-surface-variant'
+                      }`}
+                    >
+                      <p className="font-semibold">{exercise.code}</p>
+                      <p className="mt-1 leading-tight">{exercise.dose || exercise.name}</p>
+                    </li>
+                  );
+                })}
+              </ol>
+
+              {emomRunner.finished ? (
+                <p className="mt-5 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                  Timer complete. Mark the session complete only if you performed the work.
+                </p>
+              ) : null}
+
+              <div className="mt-5 flex flex-wrap items-center gap-2 border-t border-border pt-4">
+                <button
+                  type="button"
+                  onClick={() => setEmomRunner((current) => current ? { ...current, isRunning: !current.isRunning } : current)}
+                  disabled={emomRunner.finished}
+                  className="inline-flex h-9 items-center gap-1.5 rounded border border-primary bg-primary px-3 text-sm font-medium text-white hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {emomRunner.isRunning ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                  {emomRunner.isRunning ? 'Pause' : 'Resume'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEmomRunner((current) => current ? {
+                    ...current,
+                    roundIndex: 0,
+                    exerciseIndex: 0,
+                    secondsRemaining: 60,
+                    isRunning: false,
+                    finished: false,
+                  } : current)}
+                  className="inline-flex h-9 items-center gap-1.5 rounded border border-border bg-surface px-3 text-sm text-on-surface hover:bg-hover"
+                >
+                  <RotateCcw className="h-4 w-4" />
+                  Reset
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEmomRunner((current) => current ? advanceEmomStep(current) : current)}
+                  disabled={emomRunner.finished}
+                  className="inline-flex h-9 items-center gap-1.5 rounded border border-border bg-surface px-3 text-sm text-on-surface hover:bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <SkipForward className="h-4 w-4" />
+                  Next
+                </button>
+                <button
+                  type="button"
+                  onClick={discardEmomRunner}
+                  className="inline-flex h-9 items-center rounded border border-border bg-surface px-3 text-sm text-on-surface-variant hover:bg-hover"
+                >
+                  Discard
+                </button>
+                {emomRunner.finished ? (
+                  <button
+                    type="button"
+                    onClick={() => void markRunnerComplete()}
+                    disabled={completingSession === `${emomRunner.day.planId}:${emomRunner.day.sourceDay}`}
+                    className="ml-auto inline-flex h-9 items-center gap-1.5 rounded border border-emerald-700 bg-emerald-700 px-3 text-sm font-medium text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {completingSession ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                    Mark complete
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </section>
+        </div>,
+        document.body
+      ) : null}
 
       {selectedExercise ? (
         <section className="rounded-lg border border-border bg-surface p-4 shadow-sm">
@@ -774,7 +1124,7 @@ export default function HealthView() {
       ) : null}
 
       <section className="rounded-lg border border-border bg-surface p-4 shadow-sm">
-        <details>
+        <details open>
           <summary className="cursor-pointer text-sm font-semibold text-on-surface">Exercise key reference</summary>
           <div className="mt-3 flex flex-wrap gap-2">
             {exerciseLibrary.map((item) => (
@@ -807,8 +1157,44 @@ function CalibrationMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function CalibrationInput({ value, onChange, step = '1', label }: { value: number | undefined; onChange: (value: string) => void; step?: string; label: string }) {
-  return <input type="number" min="0" step={step} value={value ?? ''} onChange={(event) => onChange(event.target.value)} aria-label={label} className="h-8 w-24 rounded border border-border bg-surface px-2 text-xs text-on-surface" />;
+function ExercisePlanText({
+  planText,
+  exerciseCodes,
+  onSelect,
+}: {
+  planText: string;
+  exerciseCodes: string[];
+  onSelect: (code: string) => void;
+}) {
+  if (!exerciseCodes.length) return planText;
+
+  const pattern = new RegExp(`(\\b(?:${exerciseCodes.map(escapeRegex).join('|')})\\b)`, 'g');
+  const codes = new Set(exerciseCodes);
+  const parts: ReactNode[] = [];
+
+  planText.split(pattern).forEach((part, index) => {
+    if (!codes.has(part)) {
+      parts.push(part);
+      return;
+    }
+
+    parts.push(
+      <button
+        key={`${part}-${index}`}
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          onSelect(part);
+        }}
+        className="inline font-medium text-primary underline decoration-primary/40 underline-offset-2 hover:text-primary/70 focus:outline-none focus:ring-2 focus:ring-primary/40"
+        title={`Open ${part} exercise detail`}
+      >
+        {part}
+      </button>
+    );
+  });
+
+  return <>{parts}</>;
 }
 
 function buildDateRange(startDate: string, endDate: string) {
@@ -845,18 +1231,116 @@ function buildDisplayedDays(plan: RehabPlan): RehabDay[] {
       day: 800000 + offset + 1,
       date,
       label: formatShortDate(date),
-      kind: 'plan',
-      title: offset === 1 ? 'Health baseline for tomorrow' : 'Health check-in',
+      kind: 'status',
+      title: '',
       plan: offset === 1
-        ? 'No fixed session is scheduled. Choose movement based on recovery, then log it through capture or Health Connect.'
-        : 'No manual or device activity is recorded for this day yet.',
+        ? 'No session is scheduled. Health Connect or a capture may add activity tomorrow.'
+        : 'No session is scheduled. Waiting for Health Connect or a capture.',
       completed: false,
-      planId: 'health-baseline',
+      planId: 'health-status',
       projectId: 'health',
-      planTitle: 'Daily health',
+      planTitle: 'Health',
     });
   }
   return days.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function restoreEmomRunner(plan: RehabPlan, exercises: Exercise[]): EmomRunner | null {
+  if (typeof window === 'undefined') return null;
+
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(EMOM_RUNNER_STORAGE_KEY) || 'null') as Partial<EmomRunner> | null;
+    if (!stored?.day?.planId || !stored.day.sourceDay) return null;
+
+    const day = buildDisplayedDays(plan).find((candidate) => isSameEmomSession(candidate, stored.day as RehabDay));
+    const routine = day ? buildEmomRoutine(day.plan, exercises) : null;
+    if (!day || day.completed || !routine) {
+      window.localStorage.removeItem(EMOM_RUNNER_STORAGE_KEY);
+      return null;
+    }
+
+    const finished = Boolean(stored.finished);
+    const roundIndex = clampInteger(stored.roundIndex, 0, routine.rounds - 1);
+    const exerciseIndex = clampInteger(stored.exerciseIndex, 0, routine.exercises.length - 1);
+    return {
+      day,
+      routine,
+      roundIndex: finished ? routine.rounds - 1 : roundIndex,
+      exerciseIndex: finished ? routine.exercises.length - 1 : exerciseIndex,
+      secondsRemaining: finished ? 0 : clampInteger(stored.secondsRemaining, 1, 60),
+      isRunning: false,
+      finished,
+    };
+  } catch {
+    window.localStorage.removeItem(EMOM_RUNNER_STORAGE_KEY);
+    return null;
+  }
+}
+
+function isSameEmomSession(left: RehabDay, right: RehabDay) {
+  return Boolean(
+    left.planId
+    && right.planId
+    && left.sourceDay
+    && right.sourceDay
+    && left.planId === right.planId
+    && left.sourceDay === right.sourceDay
+  );
+}
+
+function clampInteger(value: unknown, minimum: number, maximum: number) {
+  const numeric = typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : minimum;
+  return Math.min(Math.max(numeric, minimum), maximum);
+}
+
+function buildEmomRoutine(planText: string, exercises: Exercise[]): EmomRoutine | null {
+  if (!/\bEMOM\b/i.test(planText)) return null;
+
+  const roundsMatch = planText.match(/(\d+)\s+rounds?/i);
+  const rounds = Number(roundsMatch?.[1] || 0);
+  const codes = extractExerciseCodes(planText, exercises)
+    .sort((left, right) => planText.indexOf(left) - planText.indexOf(right));
+  if (!rounds || !codes.length) return null;
+
+  return {
+    rounds,
+    exercises: codes.map((code) => {
+      const exercise = exercises.find((candidate) => candidate.code === code);
+      const doseMatch = planText.match(new RegExp('\\b' + escapeRegex(code) + '\\b\\s*([^·]+?)(?=\\s*·\\s*|$)'));
+      return {
+        code,
+        name: exercise?.name || code,
+        dose: doseMatch?.[1]?.trim() || '',
+        how: exercise?.how || 'No saved exercise instruction is available.',
+        image: exercise?.image || exercise?.images?.[0],
+      };
+    }),
+  };
+}
+
+function advanceEmomSecond(runner: EmomRunner | null) {
+  if (!runner || !runner.isRunning || runner.finished) return runner;
+  if (runner.secondsRemaining > 1) {
+    return { ...runner, secondsRemaining: runner.secondsRemaining - 1 };
+  }
+  return advanceEmomStep(runner);
+}
+
+function advanceEmomStep(runner: EmomRunner): EmomRunner {
+  if (runner.finished) return runner;
+  if (runner.exerciseIndex < runner.routine.exercises.length - 1) {
+    return { ...runner, exerciseIndex: runner.exerciseIndex + 1, secondsRemaining: 60 };
+  }
+  if (runner.roundIndex < runner.routine.rounds - 1) {
+    return { ...runner, roundIndex: runner.roundIndex + 1, exerciseIndex: 0, secondsRemaining: 60 };
+  }
+  return { ...runner, secondsRemaining: 0, isRunning: false, finished: true };
+}
+
+function formatEmomTime(seconds: number) {
+  const minutes = Math.floor(seconds / 60);
+  const remainder = String(seconds % 60).padStart(2, '0');
+  return String(minutes) + ':' + remainder;
 }
 
 function addCalendarDays(dateValue: string, offset: number) {
@@ -871,6 +1355,10 @@ function extractExerciseCodes(planText: string, exercises: Exercise[]) {
     const escaped = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     return new RegExp(`(^|[^A-Z])${escaped}([^A-Z]|$)`).test(planText);
   });
+}
+
+function escapeRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function formatShortDate(dateValue: string) {

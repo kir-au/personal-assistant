@@ -94,11 +94,7 @@ https://<ngrok-domain>/.well-known/oauth-protected-resource
 
 `MCP_PUBLIC_BASE_URL` is optional in development. If it is not set, the MCP server infers the public base URL from the incoming request host, which lets the same local process work behind ngrok or another HTTPS tunnel.
 
-Unauthenticated tool calls return an MCP OAuth challenge via:
-
-```text
-_meta["mcp/www_authenticate"]
-```
+Unauthenticated tool calls are rejected with an HTTP 401 carrying the OAuth challenge in the `WWW-Authenticate` header, so a spec-compliant client discovers the flow without configuration. See [Rejecting unauthenticated requests](#rejecting-unauthenticated-requests) for the header shape and the legacy in-band fallback.
 
 For this personal prototype, the server verifies Google access tokens through Google's `userinfo` endpoint and then checks the returned email against `GOOGLE_ALLOWED_EMAILS` or `GOOGLE_ALLOWED_DOMAINS`.
 
@@ -108,6 +104,49 @@ For production, use a first-party authorization server that fully supports the M
 - protected-resource metadata,
 - access-token audience tied to the MCP resource,
 - scope verification on every tool call.
+
+## Machine clients (service tokens)
+
+Google OAuth is built for humans: a browser opens, the person signs in, and a short-lived token is issued. A machine client cannot do that, so the server also accepts long-lived bearer tokens.
+
+```bash
+export MCP_SERVICE_TOKENS=$(openssl rand -hex 32)
+npm run mcp:assistant
+```
+
+Several tokens may be supplied comma-separated, which allows rotating one without downtime. A machine client sends its token as an ordinary Authorization header:
+
+```toml
+[mcp.servers.personal_vault]
+transport = "streamable-http"
+url = "http://127.0.0.1:8787/mcp"
+headers = { Authorization = "Bearer ${PERSONAL_VAULT_MCP_TOKEN}" }
+```
+
+Both schemes are checked in the same place. A request is allowed when the bearer token matches a configured service token, or when Google accepts it and the account passes the allowlist. The two are independent: service tokens keep working with `MCP_GOOGLE_AUTH=false`, and setting no service tokens keeps Google-only behaviour unchanged.
+
+The Google allowlist accepts two independent lists. An account is allowed when its address is in `GOOGLE_ALLOWED_EMAILS`, or when its domain is in `GOOGLE_ALLOWED_DOMAINS` (no leading `@`). If **both** lists are empty, any verified Google account is accepted — set at least one list whenever the endpoint is reachable from the internet.
+
+`GET /healthz` reports the active configuration, for example:
+
+```json
+{ "authentication": "google-oauth+service-token(1)", "googleAllowlist": "email(1)+domain(1)", "challengeMode": "http-401" }
+```
+
+Tokens are compared in constant time and are never echoed back in status output.
+
+### Rejecting unauthenticated requests
+
+An unauthenticated `/mcp` request is answered with a real HTTP 401 and a `WWW-Authenticate` header, which is what the MCP authorization spec expects and what lets a client discover the OAuth flow by itself:
+
+```text
+HTTP/1.1 401 Unauthorized
+www-authenticate: Bearer resource_metadata="https://<host>/.well-known/oauth-protected-resource", scope="openid email profile"
+```
+
+Because the check runs at the HTTP layer, this also covers `initialize` and `tools/list` — an unauthenticated caller cannot read the tool schemas. When Google auth is disabled the challenge is a plain `Bearer` with no Google metadata.
+
+Set `MCP_AUTH_CHALLENGE_MODE=in-band` to restore the old behaviour (HTTP 200 with the challenge in `_meta["mcp/www_authenticate"]`). Prefer `http-401`; `in-band` exists only for clients that ignore the HTTP status, and it is weaker — a caller can still reach input validation and learn tool parameter shapes before being refused.
 
 ## Example prompts
 

@@ -50,6 +50,7 @@ function projectIcon(name?: string) {
   const className = "w-4 h-4";
   switch (name) {
     case 'health': return <Dumbbell className={className} />;
+    case 'personal-vault': return <HardDrive className={className} />;
     case 'business': return <BriefcaseBusiness className={className} />;
     case 'ai': return <Sparkles className={className} />;
     case 'family': return <Users className={className} />;

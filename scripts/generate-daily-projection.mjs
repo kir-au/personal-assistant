@@ -1,9 +1,12 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { syncProjectPlanIndex } from './sync-project-plan-index.mjs';
+import { selectCurrentPlannerSummary } from '../lib/plannerCurrentSummary.mjs';
+import { refreshSourceInventory } from '../lib/sourceInventoryWorker.mjs';
 
-const VAULT_ROOT = path.join(process.env.HOME || '', 'personal-vault');
+const VAULT_ROOT = path.resolve(process.env.PERSONAL_VAULT_ROOT || path.join(process.env.HOME || '', 'personal-vault'));
 const OUTPUT_PATH = path.join(VAULT_ROOT, 'structured', 'plans', 'daily-projection.json');
+const PROJECTION_VERSION = 3;
 
 function getSydneyDate(offset = 0) {
   const now = new Date();
@@ -113,23 +116,27 @@ function runningBlockForDate(healthPlan, date) {
   };
 }
 
-function recurringBlockForDate(healthPlan, date) {
+function scheduleKey(planId, sourceDay) {
+  return `${planId}:${sourceDay}`;
+}
+
+function latestScheduleEvents(events) {
+  const latest = new Map();
+  for (const event of events) {
+    if (!event?.planId || !Number.isInteger(Number(event.sourceDay)) || !event.toDate) continue;
+    latest.set(scheduleKey(event.planId, Number(event.sourceDay)), event);
+  }
+  return latest;
+}
+
+function recurringBlockForOccurrence(healthPlan, session, occurrenceDate) {
   const schedule = healthPlan?.schedule || {};
-  if (schedule.type !== 'weekly-recurring' || !healthPlan?.startDate) return null;
-  if (date < healthPlan.startDate || (schedule.endDate && date > schedule.endDate)) return null;
-
-  const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
-  if (!(schedule.weekdays || []).map(Number).includes(weekday)) return null;
-
-  const session = (healthPlan.sessions || []).find((item) => Number(item.weekday) === weekday);
-  if (!session) return null;
-
   const phase = (healthPlan.progression || [])
-    .filter((item) => !item.starts || item.starts <= date)
+    .filter((item) => !item.starts || item.starts <= occurrenceDate)
     .at(-1) || {};
   const rounds = Number(session.rounds || schedule.rounds || 4);
   const durationMin = Number(session.durationMin || schedule.durationMin || 20);
-  const exercises = (session.exercises || []).map((exercise, index) => {
+  const exercises = (session.exercises || []).map((exercise) => {
     const baseReps = Number(exercise.baseReps || exercise.reps || 0);
     const reps = exercise.progression === 'press'
       ? Number(phase.pressReps || baseReps)
@@ -137,16 +144,50 @@ function recurringBlockForDate(healthPlan, date) {
     const side = exercise.perSide
       ? '/side'
       : exercise.alternateSides
-        ? ' (alternate side each round)'
+        ? ' (alternate sides)'
         : '';
-    return `${index + 1}. ${exercise.code || exercise.name} ${reps}${side}`;
-  }).join('; ');
+    const load = exercise.load ? ` (${exercise.load})` : '';
+    return `${exercise.code || exercise.name} ${reps}${side}${load}`;
+  }).join(' · ');
 
   return {
-    title: `${session.title}${phase.label ? ` · ${phase.label}` : ''}`,
-    plan: `${durationMin}-minute EMOM, ${rounds} rounds. ${exercises}.`,
+    title: '',
+    plan: `${durationMin}-minute EMOM · ${rounds} rounds · ${exercises}`,
     detail: healthPlan.rule || healthPlan.rules?.[0] || 'Move the session when recovery or schedule changes.',
   };
+}
+
+function recurringBlockForDate(healthPlan, date, scheduleEvents) {
+  const schedule = healthPlan?.schedule || {};
+  if (schedule.type !== 'weekly-recurring' || !healthPlan?.startDate) return null;
+
+  const weekdays = (schedule.weekdays || []).map(Number);
+  const endDate = schedule.endDate || addDays(healthPlan.startDate, 365);
+  const candidates = [];
+  let sourceDay = 0;
+
+  for (let occurrenceDate = healthPlan.startDate; occurrenceDate <= endDate; occurrenceDate = addDays(occurrenceDate, 1)) {
+    const weekday = new Date(`${occurrenceDate}T00:00:00Z`).getUTCDay();
+    if (!weekdays.includes(weekday)) continue;
+
+    const session = (healthPlan.sessions || []).find((item) => Number(item.weekday) === weekday);
+    if (!session) continue;
+    sourceDay += 1;
+
+    const event = scheduleEvents.get(scheduleKey(healthPlan.id, sourceDay));
+    const activeEvent = event && (!healthPlan.startDate || event.fromDate >= healthPlan.startDate)
+      ? event
+      : null;
+    const effectiveDate = activeEvent?.toDate || occurrenceDate;
+    if (effectiveDate !== date) continue;
+
+    candidates.push({
+      sourceDay,
+      block: recurringBlockForOccurrence(healthPlan, session, occurrenceDate),
+    });
+  }
+
+  return candidates.sort((left, right) => left.sourceDay - right.sourceDay)[0]?.block || null;
 }
 
 async function readActiveHealthPlans() {
@@ -170,9 +211,9 @@ async function readActiveHealthPlans() {
   return plans.filter((plan) => plan && !['paused', 'cancelled', 'archived', 'inactive'].includes(String(plan.status || 'active').toLowerCase()));
 }
 
-function healthBlockForDate(plans, date) {
+function healthBlockForDate(plans, date, scheduleEvents) {
   for (const healthPlan of plans) {
-    const block = recurringBlockForDate(healthPlan, date) || runningBlockForDate(healthPlan, date);
+    const block = recurringBlockForDate(healthPlan, date, scheduleEvents) || runningBlockForDate(healthPlan, date);
     if (block) return { ...block, source: healthPlan.sourcePath };
   }
   return null;
@@ -230,16 +271,24 @@ async function main() {
   const projectSources = await readJsonl('indexes/project-conversations.jsonl');
   const aiInsights = await readJson('structured/projects/ai-insights.json', null);
   const healthPlans = await readActiveHealthPlans();
+  const healthScheduleEvents = latestScheduleEvents(await readJsonl('structured/health/plan-schedule-events.jsonl'));
   const healthState = await readJson('structured/health/health-state.json', null);
   const activityLog = await readJsonl('structured/health/activity-log.jsonl');
   const registry = await readJson('structured/projects/registry.json', { projects: [] });
   const manualPlannerItems = await readJson('structured/plans/planner-items.json', { items: [] });
+  const sourceInventory = (await refreshSourceInventory(VAULT_ROOT)).inventory;
+  // No Vault file is a default Planner headline. A reviewed, source-linked change
+  // summary may be supplied by a later reconciliation step.
+  const currentSummary = selectCurrentPlannerSummary(
+    await readJsonl('indexes/planner-change-summaries.jsonl'),
+    today,
+  );
 
   const capturesByProject = byProject(captures);
   const sourcesByProject = byProject(projectSources);
   const todayActivity = activityLog.slice().reverse().find((entry) => entry.date === today);
-  const todayHealth = healthBlockForDate(healthPlans, today);
-  const tomorrowHealth = healthBlockForDate(healthPlans, tomorrow);
+  const todayHealth = healthBlockForDate(healthPlans, today, healthScheduleEvents);
+  const tomorrowHealth = healthBlockForDate(healthPlans, tomorrow, healthScheduleEvents);
   const recovery = healthState?.procedureRecovery;
   const recoveryHold = recovery?.status === 'needs-clinician-clearance'
     && recovery.holdStart <= today
@@ -252,8 +301,9 @@ async function main() {
     ? tomorrowHealth.detail
     : 'Record whatever movement you actually complete; no fixed running session is scheduled.';
 
-  const todayTasks = [
-    task({
+  const todayTasks = [];
+  if (recoveryHold || todayActivity || todayHealth) {
+    todayTasks.push(task({
       id: 'today-health-plan',
       title: recoveryTitle || (todayActivity
         ? `${todayActivity.status === 'partial' ? 'Health partly completed' : 'Health logged'}: ${todayActivity.summary}`
@@ -270,35 +320,12 @@ async function main() {
         : todayActivity?.calories?.totalEstimatedCalories
         ? `Estimated burn: ~${todayActivity.calories.totalEstimatedCalories} kcal.`
         : todayHealth?.plan || 'Log exercise, food, weight, pain, symptoms, or recovery if anything changes.'),
-    }),
-    task({
-      id: 'today-ai-projection',
-      title: 'Make Today projection regenerate from the vault instead of going stale.',
-      area: 'AI',
-      status: 'planned',
-      source: 'captures.jsonl + structured/projects + current Codex discussion',
-      date: today,
-      horizon: 'today',
-      priority: 90,
-      projectId: 'ai',
-      detail: 'Generate dated routine, health, and project items for the current day before rendering Today.',
-    }),
-    task({
-      id: 'today-wealth-review',
-      title: 'Decide whether the super contribution/tax thread still needs action after EOFY.',
-      area: 'Wealth',
-      status: 'review',
-      source: 'indexes/projects/wealth.json -> Супер-конtribьюшн и налоговые вычеты',
-      date: today,
-      horizon: 'today',
-      priority: 70,
-      projectId: 'wealth',
-      detail: 'This is not an automatic task; it is a resurfaced review candidate from the Wealth sources.',
-    }),
-  ];
+    }));
+  }
 
-  const tomorrowTasks = [
-    task({
+  const tomorrowTasks = [];
+  if (recoveryHold || tomorrowHealth) {
+    tomorrowTasks.push(task({
       id: 'tomorrow-health-movement',
       title: recoveryHold
         ? recoveryTitle
@@ -313,104 +340,51 @@ async function main() {
       priority: 95,
       projectId: 'health',
       detail: recoveryDetail || tomorrowHealth?.detail || healthRule,
-    }),
-    task({
-      id: 'tomorrow-ai-processor',
-      title: 'AI backlog: replace heuristic projection with a real review processor.',
-      area: 'AI',
-      status: 'suggested',
-      source: 'structured/projects/ai-backlog.json',
-      date: tomorrow,
-      horizon: 'tomorrow',
-      priority: 90,
-      projectId: 'ai',
-      detail: 'Why not done: current projection is rule-based and does not yet ask questions, create approval-ready updates, or deeply review raw project context.',
-    }),
-    task({
-      id: 'tomorrow-business-promote-source',
-      title: 'Promote one Business source into a concrete next action or mark it as reference.',
-      area: 'Business',
-      status: 'review',
-      source: 'indexes/projects/business.json',
-      date: tomorrow,
-      horizon: 'tomorrow',
-      priority: 65,
-      projectId: 'business',
-      detail: `${sourcesByProject.get('business')?.length || 0} linked Business sources exist, but no current dated commitment is selected.`,
-    }),
-  ];
-
-  const reviewQueue = [
-    task({
-      id: 'review-ai-publishing-series-history',
-      title: 'Review the old AI publishing series: drop it, or promote only what still matters.',
-      area: 'AI',
-      status: 'review',
-      source: 'structured/projects/ai-publishing-plan.json + current project dashboard decision logic',
-      horizon: 'this-week',
-      priority: 95,
-      projectId: 'ai',
-      detail: 'The June publishing plan is now historical. It should not stay in the active AI project plan unless a specific article is still relevant and gets promoted into the current timeline.',
-    }),
-    task({
-      id: 'review-ai-workstreams',
-      title: aiInsights?.suggestedActions?.[0]?.title || 'Define project extraction format.',
-      area: 'AI',
-      status: 'review',
-      source: 'structured/projects/ai-insights.json',
-      horizon: 'this-week',
-      priority: 85,
-      projectId: 'ai',
-      detail: aiInsights?.suggestedActions?.[0]?.description || '',
-    }),
-    task({
-      id: 'review-family-context',
-      title: 'Keep Family visible but do not turn source history into task debt automatically.',
-      area: 'Family',
-      status: 'review',
-      source: 'indexes/projects/family.json',
-      horizon: 'this-week',
-      priority: 50,
-      projectId: 'family',
-      detail: `${sourcesByProject.get('family')?.length || 0} linked Family sources exist. Surface only when there is an explicit commitment or decision.`,
-    }),
-  ];
+    }));
+  }
 
   // Keep explicit follow-ups outside the generated output so they survive each refresh.
-  const plannerItems = (manualPlannerItems.items || [])
+  // Overdue items require an explicit decision and never become today's work automatically.
+  const activePlannerItems = (manualPlannerItems.items || [])
     .filter((item) => {
       const status = String(item.status || '').toLowerCase();
       if (['dropped', 'archived'].includes(status)) return false;
-      if (item.projectId === 'routine') return false;
       return status !== 'done' || item.completedDate === today;
-    })
+    });
+  const plannerItems = activePlannerItems
     .map((item) => {
       const isOverdue = item.date && item.date < today && item.status !== 'done';
-      const scheduledDate = isOverdue ? today : item.date;
+      const needsPlannerReview = Boolean(isOverdue);
 
       return {
         ...task({
-      id: item.id,
-      title: item.title,
-      area: item.area || 'Admin',
-      status: item.status || 'planned',
-      source: item.source || 'structured/plans/planner-items.json',
-      date: scheduledDate,
-      horizon: isOverdue ? 'today' : item.horizon || 'this-week',
-      priority: item.priority || 50,
-      projectId: item.projectId || 'inbox',
-      detail: [isOverdue ? `Carried over from ${item.date}.` : '', item.detail, item.why ? `Why: ${item.why}` : ''].filter(Boolean).join(' '),
+          id: item.id,
+          title: item.title,
+          area: item.area || 'Admin',
+          status: needsPlannerReview ? 'review' : item.status || 'planned',
+          source: item.source || 'structured/plans/planner-items.json',
+          date: needsPlannerReview ? undefined : item.date,
+          horizon: needsPlannerReview ? 'review' : item.horizon || 'this-week',
+          priority: item.priority || 50,
+          projectId: item.projectId || 'inbox',
+          detail: [
+            needsPlannerReview ? `Scheduled for ${item.date}; choose tomorrow, later review, or archive.` : '',
+            item.detail,
+            item.why ? `Why: ${item.why}` : '',
+          ].filter(Boolean).join(' '),
         }),
         mutable: true,
         carriedOverFrom: isOverdue ? item.date : undefined,
+        needsPlannerReview,
       };
     });
 
   const projection = {
     title: 'Daily projection from Personal Vault',
-    weekFocus: 'Use recent captures and project sources to choose a small number of visible commitments. Routine stays in the projects where it matters, not as a separate default task.',
+    weekFocus: 'Show only explicit commitments and verified active plans. Missing evidence is not a task.',
     generatedAt: new Date().toISOString(),
     generatedBy: 'scripts/generate-daily-projection.mjs',
+    projectionVersion: PROJECTION_VERSION,
     windowDays: 30,
     dates: { today, tomorrow },
     generatedFrom: [
@@ -419,8 +393,14 @@ async function main() {
       `${registry.projects?.length || 0} project registry entries`,
       'structured decisions, project notes, health plans, and activity logs',
     ],
-    tasks: [...todayTasks, ...tomorrowTasks, ...reviewQueue, ...plannerItems],
+    // Health sessions are dynamic schedule state. Today and Health read them from
+    // the shared Health resolver, rather than copying them into this static file.
+    tasks: [...plannerItems],
+    currentSummary,
     contextReview: buildContextReview(plannerItems, captures, today),
+    // This is a rebuildable view of readable source changes. It is not a task list
+    // and does not alter commitment status or raw Vault files.
+    sourceInventory,
     projectSignals: Array.from(new Set([...capturesByProject.keys(), ...sourcesByProject.keys()])).map((projectId) => ({
       projectId,
       captures: capturesByProject.get(projectId)?.length || 0,
@@ -429,7 +409,14 @@ async function main() {
   };
 
   await fs.mkdir(path.dirname(OUTPUT_PATH), { recursive: true });
-  await fs.writeFile(OUTPUT_PATH, JSON.stringify(projection, null, 2) + '\n', 'utf-8');
+  const temporaryOutput = `${OUTPUT_PATH}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await fs.writeFile(temporaryOutput, JSON.stringify(projection, null, 2) + '\n', 'utf-8');
+    await fs.rename(temporaryOutput, OUTPUT_PATH);
+  } catch (error) {
+    await fs.rm(temporaryOutput, { force: true }).catch(() => {});
+    throw error;
+  }
   console.log(`Wrote ${OUTPUT_PATH}`);
   console.log(JSON.stringify({ today, tomorrow, tasks: projection.tasks.length }, null, 2));
 }

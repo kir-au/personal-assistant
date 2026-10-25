@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs/promises';
 import path from 'path';
+import { appendHealthCompletionEvent } from '@/lib/healthCompletion';
+import { readHealthPlans } from '@/lib/healthPlans';
 
 const VAULT_ROOT = path.join(process.env.HOME || '', 'personal-vault');
 const SHOULDER_REHAB_PLAN_PATH = path.join(VAULT_ROOT, 'structured', 'health', 'shoulder-rehab-plan.json');
@@ -245,6 +247,8 @@ function mergeCompleted(
 async function applyHealthActivityUpdate(capturePath: { relative: string; full: string }, appliedAt: string) {
   const markdown = await fs.readFile(capturePath.full, 'utf-8');
   const parsed = parseWorkout(markdown);
+  const recurringCompletion = await applyRecurringPlanCompletion(capturePath.relative, parsed.reportedText);
+  if (recurringCompletion.applied) return recurringCompletion;
   if (!parsed.completed.length) {
     return { applied: false, reason: 'No supported workout exercises parsed from capture.' };
   }
@@ -371,6 +375,45 @@ async function applyHealthActivityUpdate(capturePath: { relative: string; full: 
   ]);
 
   return { applied: true, planDay: day.day, date: today, completed };
+}
+
+async function applyRecurringPlanCompletion(rawPath: string, body: string) {
+  const health = await readHealthPlans();
+  const session = health.days.find((day) => (
+    day.date === health.todayDate
+    && day.kind === 'kettlebell'
+    && !day.completed
+    && day.planId
+    && day.sourceDay
+  ));
+  if (!session?.planId || !session.sourceDay) {
+    return { applied: false, reason: 'No due recurring kettlebell session found.' };
+  }
+
+  const exerciseCodes = Array.from(new Set(session.plan.match(/\b[A-Z]{2,4}\b/g) || []));
+  const explicitlyComplete = /(?:full|entire|whole|all\s+(?:four|4)|4\s*\/\s*4).{0,30}(?:workout|session|circuit|rounds)|(?:workout|session|circuit).{0,20}(?:done|complete(?:d)?|finished)|(?:сделал|закончил).{0,25}(?:всю|полностью|тренировк|сесси|круг)/i.test(body);
+  const explicitlyPartial = /(?:partial|not\s+complete|stopped|не\s+доделал|частично|\b[123]\s*(?:of|из)\s*4\b|\b[123]\s+rounds?\b)/i.test(body);
+  const namesEveryExercise = exerciseCodes.length > 0
+    && exerciseCodes.every((code) => new RegExp(`\\b${code}\\b`, 'i').test(body));
+
+  if (!explicitlyComplete || explicitlyPartial || !namesEveryExercise) {
+    return { applied: false, reason: 'The capture does not explicitly confirm the complete current kettlebell session.' };
+  }
+
+  const event = await appendHealthCompletionEvent({
+    planId: session.planId,
+    sourceDay: session.sourceDay,
+    completedDate: health.todayDate,
+    source: 'capture-processor',
+    rawPath,
+  });
+  return {
+    applied: true,
+    planId: session.planId,
+    sourceDay: session.sourceDay,
+    date: health.todayDate,
+    completionEvent: event.id,
+  };
 }
 
 async function applyStructuredUpdate(request: {
