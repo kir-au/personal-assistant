@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.kirill.personal-assistant.mcp</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>export PATH="__NODE_DIR__:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export MCP_PORT="8787"
+export PERSONAL_VAULT_MCP_URL="__VAULT_MCP_URL__"
+cd __REPO_DIR__ && exec __NODE_BIN__ mcp/personal-assistant-server.mjs</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>__LOG_DIR__/personal-assistant-mcp.out.log</string>
+  <key>StandardErrorPath</key><string>__LOG_DIR__/personal-assistant-mcp.err.log</string>
+</dict>
+</plist>
