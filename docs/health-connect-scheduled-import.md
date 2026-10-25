@@ -34,11 +34,16 @@ The local importer stages Drive exports in:
 
 The scheduled agent is:
 
-`com.kirill.personal-vault.health-connect-import`
+`com.kirill.personal-assistant.health-connect-import`
 
 It runs at login and every 15 minutes. It copies ZIP files from Drive, then uses:
 
-`/Users/kirill/personal-vault/automations/import-health-connect-exports.sh`
+`/Users/kirill/development/personal/personal-dashboard/deploy/import-health-connect-exports.sh`
+
+The agent and its script are versioned in this repository under `deploy/`, not in
+the Vault data directory. Install it with `./deploy/install-launchd.sh`. The old
+agent label `com.kirill.personal-vault.health-connect-import` was retired in
+October 2026 when Assistant runtime moved out of the Vault folder.
 
 Manual commands:
 

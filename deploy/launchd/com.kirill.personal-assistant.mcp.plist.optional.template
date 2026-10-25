@@ -10,7 +10,7 @@
     <string>export PATH="__NODE_DIR__:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export MCP_PORT="8787"
 export PERSONAL_VAULT_MCP_URL="__VAULT_MCP_URL__"
-cd __REPO_DIR__ && exec __NODE_BIN__ mcp/personal-assistant-server.mjs</string>
+cd __REPO_DIR__ || exit 1; exec __NODE_BIN__ mcp/personal-assistant-server.mjs</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
